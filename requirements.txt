@@ -1,0 +1,13 @@
+gradio
+langchain-core
+langchain-mistralai
+langgraph
+sentence-transformers
+scikit-learn
+bertopic
+plotly
+numpy
+pandas
+hdbscan
+umap-learn
+pynndescent
