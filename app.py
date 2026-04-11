@@ -399,20 +399,45 @@ body, .gradio-container {
 .dataframe-wrap td {
     background: var(--bg-surface) !important; color: var(--text-primary) !important;
     padding: 9px 12px !important; border-bottom: 1px solid var(--border) !important;
+    line-height: 1.35 !important;
+    vertical-align: top !important;
 }
 .dataframe-wrap th,
-.dataframe-wrap td,
-.dataframe-wrap td > div {
+.dataframe-wrap td {
+    white-space: nowrap !important;
+}
+.dataframe-wrap td > div,
+.dataframe-wrap td > span,
+.dataframe-wrap td > p {
+    display: block !important;
+    max-width: 100% !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    cursor: pointer !important;
+}
+.dataframe-wrap td:focus-within > div,
+.dataframe-wrap td:focus-within > span,
+.dataframe-wrap td:focus-within > p {
     white-space: normal !important;
     overflow-wrap: anywhere !important;
     word-break: break-word !important;
-    vertical-align: top !important;
+    max-height: 9em !important;
+    overflow-y: auto !important;
+    padding-right: 2px !important;
 }
 .dataframe-wrap textarea,
 .dataframe-wrap input[type="text"] {
     white-space: pre-wrap !important;
     overflow-wrap: anywhere !important;
     word-break: break-word !important;
+}
+.dataframe-wrap textarea {
+    min-height: 38px !important;
+    height: 38px !important;
+    max-height: 160px !important;
+    overflow-y: auto !important;
+    resize: vertical !important;
 }
 .dataframe-wrap tr:hover td { background: var(--bg-hover) !important; }
 .dataframe-wrap input[type="checkbox"] {
