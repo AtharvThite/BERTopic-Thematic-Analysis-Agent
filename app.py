@@ -210,6 +210,7 @@ body, .gradio-container {
     gap: 16px !important;
     max-width: 1160px;
     margin: 0 auto;
+    width: 100%;
 }
 
 .panel-card {
@@ -222,7 +223,10 @@ body, .gradio-container {
     padding: 18px 18px 16px;
     position: relative;
     overflow: hidden;
+    margin-bottom: 2px;
 }
+
+.panel-card:last-child { margin-bottom: 0; }
 
 .panel-card::after {
     content: '';
@@ -239,7 +243,9 @@ body, .gradio-container {
 .card-title {
     font-size: 0.74rem; font-weight: 700; letter-spacing: 0.1em;
     text-transform: uppercase; color: var(--text-muted);
-    margin: 0 0 14px; display: flex; align-items: center; gap: 10px;
+    margin: 0 0 16px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
 }
 .card-title::before {
     content: '';
@@ -376,7 +382,13 @@ body, .gradio-container {
 }
 
 /* Dataframe */
-.dataframe-wrap table { font-family: var(--font-mono) !important; font-size: 0.78rem !important; border-collapse: collapse !important; width: 100% !important; }
+.dataframe-wrap table {
+    font-family: var(--font-mono) !important;
+    font-size: 0.78rem !important;
+    border-collapse: collapse !important;
+    width: 100% !important;
+    table-layout: fixed !important;
+}
 .dataframe-wrap th {
     background: var(--bg-elevated) !important; color: var(--text-muted) !important;
     font-family: var(--font-ui) !important; font-size: 0.72rem !important;
@@ -387,6 +399,20 @@ body, .gradio-container {
 .dataframe-wrap td {
     background: var(--bg-surface) !important; color: var(--text-primary) !important;
     padding: 9px 12px !important; border-bottom: 1px solid var(--border) !important;
+}
+.dataframe-wrap th,
+.dataframe-wrap td,
+.dataframe-wrap td > div {
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    vertical-align: top !important;
+}
+.dataframe-wrap textarea,
+.dataframe-wrap input[type="text"] {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
 }
 .dataframe-wrap tr:hover td { background: var(--bg-hover) !important; }
 .dataframe-wrap input[type="checkbox"] {
@@ -718,7 +744,7 @@ def build_app() -> gr.Blocks:
         # ── Main vertical body ────────────────────────────────────────────
         with gr.Column(elem_id="main-body"):
 
-            with gr.Group(elem_classes=["panel-card", "panel-data"]):
+            with gr.Column(elem_classes=["panel-card", "panel-data"]):
                 gr.HTML("""<div class="card-title"><span>Data Input</span></div>""")
 
                 file_input = gr.File(
@@ -748,7 +774,7 @@ def build_app() -> gr.Blocks:
                     <code style='font-family:var(--font-mono);'>export results</code>
                 </div>""")
 
-            with gr.Group(elem_classes=["panel-card", "panel-chat"]):
+            with gr.Column(elem_classes=["panel-card", "panel-chat"]):
                 gr.HTML("""<div class="card-title"><span>Agent Console</span></div>""")
 
                 chatbot = gr.Chatbot(
@@ -783,7 +809,7 @@ def build_app() -> gr.Blocks:
                         elem_classes=["btn-secondary"],
                     )
 
-            with gr.Group(elem_classes=["panel-card", "panel-results"]):
+            with gr.Column(elem_classes=["panel-card", "panel-results"]):
                 gr.HTML("""<div class="card-title"><span>Results</span></div>""")
 
                 with gr.Tabs(elem_classes=["tabs"]):
