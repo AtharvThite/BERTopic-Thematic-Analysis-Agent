@@ -33,6 +33,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
 # Agent import — graceful stub when agent.py is absent during dev/testing
@@ -84,6 +85,7 @@ EMPTY_REVIEW_DF = pd.DataFrame(columns=REVIEW_COLUMNS)
 # FIX ISSUE 4 — detect missing API key at startup
 API_KEY_MISSING = not bool(os.environ.get("MISTRAL_API_KEY", ""))
 UPLOADS_DIR = Path("uploads")
+OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 
 # ---------------------------------------------------------------------------
 # Custom CSS — SaaS dashboard aesthetic
@@ -735,7 +737,14 @@ def get_chart_html(chart_choice: str, agent_state: dict) -> str:
     if chart_choice in charts:
         src = charts[chart_choice]
         if os.path.exists(src):
-            return f'<iframe src="file={src}" class="chart-frame" frameborder="0"></iframe>'
+            # Gradio 6 serves local files from /gradio_api/file=..., and
+            # paths must be URL-encoded when directories contain spaces.
+            normalised = str(Path(src).resolve()).replace("\\", "/")
+            encoded = quote(normalised, safe="/:")
+            return (
+                f'<iframe src="./gradio_api/file={encoded}" '
+                'class="chart-frame" frameborder="0"></iframe>'
+            )
         return f'<div class="chart-frame fade-in">{src}</div>'
     return build_placeholder_chart(chart_choice)
 
@@ -972,11 +981,15 @@ def build_app() -> gr.Blocks:
             outputs=[download_file_list_html, download_files],
         )
 
-        # Auto-refresh review table + downloads after every chat turn
+        # Auto-refresh review table, downloads, and the active chart after every chat turn.
         chatbot.change(
-            fn=lambda a: (refresh_review_table(a), *refresh_downloads(a)),
-            inputs=[agent_state],
-            outputs=[review_table, download_file_list_html, download_files],
+            fn=lambda selected_chart, a: (
+                refresh_review_table(a),
+                *refresh_downloads(a),
+                get_chart_html(selected_chart, a),
+            ),
+            inputs=[chart_selector, agent_state],
+            outputs=[review_table, download_file_list_html, download_files, chart_display],
         )
 
     return app
@@ -992,6 +1005,7 @@ if __name__ == "__main__":
         server_port=7860,
         share=False,
         show_error=True,
+        allowed_paths=[str(OUTPUTS_DIR.resolve())],
         css=CUSTOM_CSS,
         theme=gr.themes.Soft(
             primary_hue=gr.themes.colors.indigo,
