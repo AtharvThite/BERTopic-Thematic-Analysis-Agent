@@ -1,33 +1,37 @@
 # BERTopic Thematic Analysis Agent
 
-A Gradio-based research dashboard that runs a phase-gated thematic analysis pipeline using BERTopic-style clustering, LangGraph orchestration, and Mistral for labeling and narrative generation.
+Production Gradio dashboard for phase-gated thematic analysis of Scopus exports.
 
-## What this project does
+The system combines:
 
-- Loads Scopus-style CSV files.
-- Splits and preprocesses `Abstract` and `Title` text into sentence corpora.
-- Generates embeddings and clusters sentences into topics.
-- Labels clusters with an LLM.
-- Lets you review and approve topics in a table.
-- Consolidates approved topics into themes.
-- Maps themes to a PAJAIS taxonomy.
-- Exports comparison CSVs and narrative outputs.
+- Sentence-BERT embeddings (`all-MiniLM-L6-v2`)
+- Agglomerative clustering for topic discovery
+- LangGraph ReAct orchestration
+- Mistral for topic labels, taxonomy mapping, and narrative generation
 
-## Project structure
+## Highlights
 
-- `app.py`: Gradio UI and event wiring.
-- `agent.py`: LangGraph ReAct agent wrapper with phase gating.
-- `tools.py`: Tool functions for each pipeline stage.
-- `requirements.txt`: Python dependencies.
-- `uploads/`: Persisted uploaded CSV files.
-- `outputs/`: Generated artifacts.
+- End-to-end pipeline aligned with Braun and Clarke thematic analysis phases
+- Researcher-in-the-loop review table (approve, rename, reason)
+- Automatic chart generation and in-UI rendering
+- Taxonomy mapping against PAJAIS categories
+- Exports for reproducible reporting (`csv`, `json`, `txt`, `html`, `npy`)
 
-## Prerequisites
+## Repository Layout
 
-- Python 3.11 or 3.12 is recommended.
-- Python 3.14 may run, but you can see compatibility warnings from LangChain internals.
+- `app.py` - Gradio UI, event wiring, chart embedding, downloads panel
+- `agent.py` - phase-gated LangGraph agent and state transitions
+- `tools.py` - seven analysis tools used by the agent
+- `requirements.txt` - Python dependencies
+- `uploads/` - persisted uploaded CSV files
+- `outputs/` - generated artifacts and charts
 
-## Installation
+## Requirements
+
+- Python 3.11 or 3.12 recommended
+- Python 3.14 can run, but LangChain may emit pydantic-v1 compatibility warnings
+
+## Setup
 
 ```bash
 cd "/home/atharv/Desktop/Thematic Analysis"
@@ -36,17 +40,16 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Environment variables
+## Environment Variables
 
-Set these in the same terminal where you run the app:
+Set in the same shell where you run the app:
 
 ```bash
 export MISTRAL_API_KEY="your-mistral-api-key"
-# optional, improves Hugging Face model download reliability and limits
-export HF_TOKEN="your-hf-token"
+export HF_TOKEN="your-hf-token"  # optional but recommended for model downloads
 ```
 
-## Run locally
+## Run
 
 ```bash
 cd "/home/atharv/Desktop/Thematic Analysis"
@@ -54,38 +57,56 @@ source venv/bin/activate
 python app.py
 ```
 
-Open the URL printed in terminal (usually `http://0.0.0.0:7860` or `http://127.0.0.1:7860`).
+Open the URL shown in the terminal, usually:
 
-## CSV format
+- `http://0.0.0.0:7860`
+- `http://127.0.0.1:7860`
 
-Expected columns:
+## Input CSV Format
+
+Required columns:
 
 - `Title`
 - `Abstract`
 
-Other columns are allowed, but these two are required for the main flow.
+Additional columns are allowed.
 
-## UI workflow
+## Analysis Workflow
 
-1. Upload a CSV from the Data Input card.
-2. In chat, run: `run abstract`
-3. Wait for Phase 2 to complete and review table to populate.
-4. In the Review tab:
-- Set `Approve` for accepted topics.
-- Optionally edit `Rename To` and `Reasoning`.
-- Click `Submit Review`.
-5. Continue through phases in chat:
-- `confirm themes`
-- `approve themes`
-- `run taxonomy`
+1. Upload a CSV in the Data Input panel.
+2. The app auto-triggers Phase 1 context once upload succeeds.
+3. In chat, start discovery with `run abstract`.
+4. Review generated topics in the Review tab.
+5. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
+6. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
+7. Use Charts and Downloads tabs for visual and file outputs.
+
+## Useful Chat Prompts
+
+- `run abstract`
+- `run title`
+- `show topics`
+- `export results`
 - `generate report`
-6. Download files from the Downloads tab.
 
-## Generated outputs
+The agent is robust to natural-language variants, but short explicit prompts are most reliable.
 
-Typical files under `outputs/`:
+## Tools Implemented in `tools.py`
+
+1. `load_scopus_csv(filepath)`
+2. `run_bertopic_discovery(run_key, threshold)`
+3. `label_topics_with_llm(run_key)`
+4. `consolidate_into_themes(run_key, theme_map)`
+5. `compare_with_taxonomy(run_key)`
+6. `generate_comparison_csv()`
+7. `export_narrative(run_key)`
+
+## Output Artifacts
+
+Common outputs include:
 
 - `outputs/corpus.csv`
+- `outputs/comparison.csv`
 - `outputs/abstract/sentences.json`
 - `outputs/abstract/emb.npy`
 - `outputs/abstract/sent_labels.npy`
@@ -94,36 +115,63 @@ Typical files under `outputs/`:
 - `outputs/abstract/themes.json`
 - `outputs/abstract/taxonomy_map.json`
 - `outputs/abstract/narrative.txt`
-- `outputs/comparison.csv`
-- Chart HTML files such as `intertopic.html`, `topwords.html`, `hierarchy.html`, `heatmap.html`
+- `outputs/abstract/intertopic.html`
+- `outputs/abstract/topwords.html`
+- `outputs/abstract/hierarchy.html`
+- `outputs/abstract/heatmap.html`
+
+Equivalent files are produced under `outputs/title/` when title-run analysis is executed.
+
+## Charts in UI
+
+Charts are rendered from generated HTML files in `outputs/`.
+
+Current implementation details:
+
+- Uses Gradio 6 file route: `/gradio_api/file=...`
+- URL-encodes file paths to handle spaces in directories
+- Sets `allowed_paths` in `demo.launch(...)` to allow serving `outputs/`
+- Auto-refreshes chart panel after agent responses
 
 ## Troubleshooting
 
-### Missing MISTRAL key
+### Charts not visible with {"detail":"Not Found"}
 
-If you see:
+- Ensure you are on the latest `app.py` and restart the server.
+- Hard refresh browser (`Ctrl+Shift+R`).
+- Confirm chart files exist under `outputs/<run_key>/`.
 
-- `MISTRAL_API_KEY is not set`
+### MISTRAL key missing
 
-Then set the key and restart the app in the same shell.
+If the UI or terminal reports missing API key:
 
-### Hugging Face warning
+```bash
+export MISTRAL_API_KEY="your-mistral-api-key"
+```
 
-If you see unauthenticated HF warnings, set `HF_TOKEN` for better rate limits and download behavior.
+Restart the app after setting it.
 
-### Review table Approve checkbox not clickable
+### Hugging Face unauthenticated warning
 
-Restart after pulling latest changes. The table is configured to keep `Approve` as interactive boolean cells.
+Set `HF_TOKEN` to improve rate limits and download reliability.
 
-### `summaries.json` not found
+### Temporary Mistral outages (503 / unreachable_backend)
 
-Re-run from Phase 1/2 after uploading a file. Output paths are now anchored to the project directory.
+The code includes retries and bounded backoff. If all retries fail, retry your last command after 30 to 60 seconds.
 
-### Long wait on `run abstract`
+### Slow runtime on large corpora
 
-Large datasets can be slow. Labeling is capped to top clusters and LLM calls use fail-fast timeout settings, but runtime still depends on corpus size and API latency.
+Expected for large datasets due to embedding and LLM labeling costs. Labeling is already capped to reduce transcript and latency pressure.
 
-## Notes
+## Security Notes
 
-- Do not commit API keys to source files.
-- Rotate keys if they were exposed in terminal logs or chats.
+- Never commit API keys.
+- Rotate keys immediately if they appear in logs, screenshots, or chat history.
+
+## Citation Context
+
+Methodological framing and implementation are inspired by:
+
+- Braun and Clarke (2006) reflexive thematic analysis
+- Grootendorst (2022) BERTopic
+- Sentence-BERT literature for semantic embeddings
