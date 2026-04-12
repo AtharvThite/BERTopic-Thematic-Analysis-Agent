@@ -52,7 +52,7 @@ except ImportError:
                 "Connect `agent.py` to get real responses. "
                 f"Current phase: `{state.get('phase', 0)}`."
             )
-            state["phase"] = min(state.get("phase", 0) + 1, 6)
+            state["phase"] = min(state.get("phase", 0) + 1, 8)
             return reply, state
 
     agent = _StubAgent()
@@ -504,8 +504,8 @@ select { background: var(--bg-elevated) !important; border: 1px solid var(--bord
 def build_phase_html(current_phase: int) -> str:
     """
     Render the 7-step phase progress bar.
-    current_phase is the agent's phase (1-6); phase 0 = no phase started yet.
-    We subtract 1 to get the 0-based index into PHASES.
+    current_phase is the agent's phase (1-7); phase 0 = no phase started yet.
+    Phase 8 indicates full completion and renders all 7 steps as done.
     """
     items = []
     for i, label in enumerate(PHASES):

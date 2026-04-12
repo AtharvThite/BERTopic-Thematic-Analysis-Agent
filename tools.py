@@ -33,6 +33,7 @@ Dependencies
 import json
 import os
 import re
+import time
 from functools import reduce
 from pathlib import Path
 from operator import itemgetter
@@ -68,9 +69,12 @@ N_EVIDENCE:      int   = 5       # sentences kept per cluster centroid
 DISTANCE_THRESH: float = 0.35   # cosine-distance threshold (1 - similarity)
 RANDOM_SEED:     int   = 42
 LLM_TIMEOUT_S:   int   = 45
-LLM_MAX_RETRIES: int   = 1
+LLM_MAX_RETRIES: int   = 3
 MAX_LABEL_CLUSTERS: int = 60
 MIN_CLUSTER_SIZE_FOR_LABEL: int = 3
+MAX_TOOL_RETURN_PREVIEW: int = 12
+PROVIDER_RETRY_ATTEMPTS: int = 3
+PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
 
 # Run configurations — keys map to source columns
 RUN_CONFIGS: dict[str, list[str]] = {
@@ -179,6 +183,38 @@ def _llm() -> ChatMistralAI:
         timeout=LLM_TIMEOUT_S,
         max_retries=LLM_MAX_RETRIES,
     )
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    """Detect transient Mistral outages that should be retried."""
+    msg = str(exc).lower()
+    return (
+        "unreachable_backend" in msg
+        or "internal server error" in msg
+        or '"code":"1100"' in msg
+        or '"raw_status_code":503' in msg
+        or '"raw_status_code":502' in msg
+        or '"raw_status_code":504' in msg
+        or "service unavailable" in msg
+    )
+
+
+def _invoke_with_retries(fn):
+    """Run an LLM call with bounded linear backoff on transient provider errors."""
+    last_exc: Exception | None = None
+    for attempt in range(PROVIDER_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_transient_provider_error(exc):
+                raise
+            last_exc = exc
+            if attempt < PROVIDER_RETRY_ATTEMPTS - 1:
+                time.sleep(PROVIDER_RETRY_BASE_DELAY_S * (attempt + 1))
+                continue
+            raise last_exc
+
+    raise RuntimeError("Unexpected retry flow in _invoke_with_retries")
 
 
 def _save_json(path: Path, data: object) -> None:
@@ -431,7 +467,7 @@ def label_topics_with_llm(run_key: str) -> dict:
     Returns
     -------
     dict with keys:
-        run_key, labels_path, labelled_count, labels (list of dicts)
+        run_key, labels_path, labelled_count, labels_preview (list of dicts)
     """
     rdir      = _run_dir(run_key)
     summaries_path = rdir / "summaries.json"
@@ -443,7 +479,7 @@ def label_topics_with_llm(run_key: str) -> dict:
             "total_clusters":    0,
             "selected_clusters": 0,
             "skipped_clusters":  0,
-            "labels":            [],
+            "labels_preview":    [],
             "error": (
                 f"Missing discovery artifact: {summaries_path}. "
                 "Run run_bertopic_discovery first for this run_key."
@@ -462,18 +498,31 @@ def label_topics_with_llm(run_key: str) -> dict:
     chain = _LABEL_PROMPT | _llm() | JsonOutputParser()
 
     def _label_one(summary: dict) -> dict:
-        result = chain.invoke({
+        result = _invoke_with_retries(lambda: chain.invoke({
             "cluster_id": summary["cluster_id"],
             "size":       summary["size"],
             "evidence":   "\n".join(
                               f"  {i+1}. {s}"
                               for i, s in enumerate(summary["evidence"])
                           ),
-        })
+        }))
         return {**summary, **result}
 
     labelled = list(map(_label_one, selected))
     _save_json(rdir / "labels.json", labelled)
+
+    # Keep tool output compact so the ReAct transcript does not overflow model context.
+    preview = list(map(
+        lambda r: {
+            "cluster_id": r.get("cluster_id"),
+            "label":      r.get("label"),
+            "category":   r.get("category"),
+            "confidence": r.get("confidence"),
+            "size":       r.get("size"),
+            "niche":      r.get("niche", False),
+        },
+        labelled[:MAX_TOOL_RETURN_PREVIEW],
+    ))
 
     return {
         "run_key":        run_key,
@@ -482,7 +531,7 @@ def label_topics_with_llm(run_key: str) -> dict:
         "total_clusters": len(summaries),
         "selected_clusters": len(selected),
         "skipped_clusters": max(0, len(summaries) - len(selected)),
-        "labels":         labelled,
+        "labels_preview": preview,
     }
 
 
@@ -505,7 +554,7 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> dict:
     Returns
     -------
     dict with keys:
-        run_key, theme_count, themes_path, themes (list of dicts)
+        run_key, theme_count, themes_path, themes_preview (list of dicts)
     """
     rdir        = _run_dir(run_key)
     labels_data = _load_json(rdir / "labels.json")
@@ -569,11 +618,20 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> dict:
 
     _save_json(rdir / "themes.json", themes)
 
+    preview = list(map(
+        lambda t: {
+            "theme_name":   t.get("theme_name"),
+            "size":         t.get("size", 0),
+            "cluster_count": len(t.get("cluster_ids", [])),
+        },
+        themes[:MAX_TOOL_RETURN_PREVIEW],
+    ))
+
     return {
         "run_key":     run_key,
         "theme_count": len(themes),
         "themes_path": str(rdir / "themes.json"),
-        "themes":      themes,
+        "themes_preview": preview,
     }
 
 
@@ -614,7 +672,7 @@ def compare_with_taxonomy(run_key: str) -> dict:
     Returns
     -------
     dict with keys:
-        run_key, taxonomy_path, mapped_count, novel_count, taxonomy_map
+        run_key, taxonomy_path, mapped_count, novel_count, mapping_preview
     """
     rdir   = _run_dir(run_key)
     themes = _load_json(rdir / "themes.json")
@@ -623,11 +681,11 @@ def compare_with_taxonomy(run_key: str) -> dict:
     taxonomy_str = "\n".join(f"  - {cat}" for cat in PAJAIS_TAXONOMY)
 
     def _map_theme(theme: dict) -> dict:
-        result = chain.invoke({
+        result = _invoke_with_retries(lambda: chain.invoke({
             "taxonomy":   taxonomy_str,
             "theme_name": theme["theme_name"],
             "evidence":   " | ".join(theme.get("evidence", [])[:3]),
-        })
+        }))
         return {**theme, **result}
 
     taxonomy_map = list(map(_map_theme, themes))
@@ -636,12 +694,22 @@ def compare_with_taxonomy(run_key: str) -> dict:
     novel_count  = sum(1 for t in taxonomy_map if t.get("is_novel", False))
     mapped_count = len(taxonomy_map) - novel_count
 
+    preview = list(map(
+        lambda t: {
+            "theme_name":   t.get("theme_name"),
+            "pajais_match": t.get("pajais_match", "NOVEL"),
+            "confidence":   t.get("confidence", 0),
+            "is_novel":     t.get("is_novel", False),
+        },
+        taxonomy_map[:MAX_TOOL_RETURN_PREVIEW],
+    ))
+
     return {
         "run_key":       run_key,
         "taxonomy_path": str(rdir / "taxonomy_map.json"),
         "mapped_count":  mapped_count,
         "novel_count":   novel_count,
-        "taxonomy_map":  taxonomy_map,
+        "mapping_preview": preview,
     }
 
 
@@ -759,10 +827,10 @@ def export_narrative(run_key: str) -> dict:
     title_str    = "\n".join(map(_theme_summary, title_map)) or "Not run."
 
     chain    = _NARRATIVE_PROMPT | _llm()
-    response = chain.invoke({
+    response = _invoke_with_retries(lambda: chain.invoke({
         "abstract_themes": abstract_str,
         "title_themes":    title_str,
-    })
+    }))
 
     narrative = response.content if hasattr(response, "content") else str(response)
     out_path  = rdir / "narrative.txt"
