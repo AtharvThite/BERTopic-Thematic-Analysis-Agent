@@ -87,6 +87,13 @@ PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
 RUN_CONFIGS: dict[str, list[str]] = {
     "abstract": ["Abstract"],
     "title":    ["Title"],
+    "keywords": [
+        "Author Keywords",
+        "Author Keywords Plus",
+        "Index Keywords",
+        "Keywords",
+        "Author_Keywords",
+    ],
 }
 
 # PAJAIS 25-category taxonomy (Pan-Pacific Journal of AIS)
@@ -129,6 +136,8 @@ _BOILERPLATE_RE = re.compile(
 
 # Sentence splitter — split on sentence-boundary punctuation, keep >= 20 chars
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
+_KEYWORD_SPLIT_RE = re.compile(r"\s*[;|]\s*")
+_KEYWORD_COMMA_RE = re.compile(r"\s*,\s*")
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +162,39 @@ def _split_sentences(text: str) -> list[str]:
         lambda s: len(s.strip()) >= 20,
         _SENT_RE.split(_clean_text(text)),
     ))
+
+
+def _split_keywords(text: str) -> list[str]:
+    cleaned = _clean_text(text).replace("\n", " ").strip()
+    if not cleaned:
+        return []
+    primary = list(filter(None, map(str.strip, _KEYWORD_SPLIT_RE.split(cleaned))))
+    terms = (
+        primary
+        if len(primary) > 1
+        else list(filter(None, map(str.strip, _KEYWORD_COMMA_RE.split(cleaned))))
+    )
+    return list(dict.fromkeys(filter(lambda t: len(t) >= 2, terms)))
+
+
+def _resolve_column_name(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    normalised = {
+        str(col).strip().lower(): col
+        for col in df.columns
+    }
+    return next(
+        (normalised.get(str(c).strip().lower()) for c in candidates
+         if normalised.get(str(c).strip().lower()) is not None),
+        None,
+    )
+
+
+def _texts_for_candidates(df: pd.DataFrame, candidates: list[str]) -> tuple[list[str], str | None]:
+    col = _resolve_column_name(df, candidates)
+    return (
+        df[col].dropna().astype(str).tolist(),
+        col,
+    ) if col else ([], None)
 
 
 def _embed(sentences: list[str]) -> np.ndarray:
@@ -360,27 +402,40 @@ def load_scopus_csv(filepath: str) -> dict:
     -------
     dict with keys:
         paper_count, abstract_sentence_count, title_sentence_count,
+        keywords_term_count,
         columns, sample_abstracts, filepath
     """
     df = pd.read_csv(filepath).rename(columns=str.strip)
 
+    abstract_texts, abstract_col = _texts_for_candidates(df, RUN_CONFIGS["abstract"])
+    title_texts, title_col       = _texts_for_candidates(df, RUN_CONFIGS["title"])
+    keywords_texts, keywords_col = _texts_for_candidates(df, RUN_CONFIGS["keywords"])
+
     abstract_sentences = list(reduce(
         lambda acc, sents: acc + sents,
-        map(_split_sentences, df["Abstract"].dropna().tolist()),
+        map(_split_sentences, abstract_texts),
         [],
     ))
 
     title_sentences = list(reduce(
         lambda acc, sents: acc + sents,
-        map(_split_sentences, df["Title"].dropna().tolist()),
+        map(_split_sentences, title_texts),
+        [],
+    ))
+
+    keywords_terms = list(reduce(
+        lambda acc, terms: acc + terms,
+        map(_split_keywords, keywords_texts),
         [],
     ))
 
     _ensure_dir(OUTPUT_DIR / "abstract")
     _ensure_dir(OUTPUT_DIR / "title")
+    _ensure_dir(OUTPUT_DIR / "keywords")
 
     _save_json(OUTPUT_DIR / "abstract" / "sentences.json", abstract_sentences)
     _save_json(OUTPUT_DIR / "title"    / "sentences.json", title_sentences)
+    _save_json(OUTPUT_DIR / "keywords" / "sentences.json", keywords_terms)
 
     df.to_csv(OUTPUT_DIR / "corpus.csv", index=False)
 
@@ -388,8 +443,14 @@ def load_scopus_csv(filepath: str) -> dict:
         "paper_count":             int(len(df)),
         "abstract_sentence_count": int(len(abstract_sentences)),
         "title_sentence_count":    int(len(title_sentences)),
+        "keywords_term_count":     int(len(keywords_terms)),
+        "detected_columns": {
+            "abstract": abstract_col,
+            "title": title_col,
+            "keywords": keywords_col,
+        },
         "columns":                 df.columns.tolist(),
-        "sample_abstracts":        df["Abstract"].dropna().head(3).tolist(),
+        "sample_abstracts":        abstract_texts[:3],
         "filepath":                str(filepath),
     }
 
@@ -412,7 +473,7 @@ def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> 
 
     Parameters
     ----------
-    run_key   : str   — "abstract" or "title"
+    run_key   : str   — "abstract" or "title" or "keywords"
     threshold : float — cosine distance threshold for AgglomerativeClustering
 
     Returns
@@ -421,8 +482,47 @@ def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> 
         run_key, n_clusters, n_sentences, threshold,
         chart_paths, summaries_path, embeddings_path
     """
+    if run_key not in RUN_CONFIGS:
+        return {
+            "run_key": run_key,
+            "n_clusters": 0,
+            "n_sentences": 0,
+            "threshold": threshold,
+            "chart_paths": {},
+            "error": (
+                f"Unsupported run_key: {run_key}. "
+                f"Use one of: {', '.join(RUN_CONFIGS.keys())}."
+            ),
+        }
+
     rdir      = _run_dir(run_key)
-    sentences = _load_json(OUTPUT_DIR / run_key / "sentences.json")
+    sent_path = OUTPUT_DIR / run_key / "sentences.json"
+    if not sent_path.exists():
+        return {
+            "run_key": run_key,
+            "n_clusters": 0,
+            "n_sentences": 0,
+            "threshold": threshold,
+            "chart_paths": {},
+            "error": (
+                f"Missing sentences artifact: {sent_path}. "
+                "Run load_scopus_csv first."
+            ),
+        }
+
+    sentences = _load_json(sent_path)
+    if not sentences:
+        return {
+            "run_key": run_key,
+            "n_clusters": 0,
+            "n_sentences": 0,
+            "threshold": threshold,
+            "chart_paths": {},
+            "error": (
+                f"No sentences/terms found for run_key={run_key}. "
+                "Check that the corresponding source column exists in the CSV."
+            ),
+        }
 
     embeddings = _embed(sentences)
     np.save(str(rdir / "emb.npy"), embeddings)
@@ -502,7 +602,7 @@ def label_topics_with_llm(run_key: str) -> dict:
 
     Parameters
     ----------
-    run_key : str — "abstract" or "title"
+    run_key : str — "abstract" or "title" or "keywords"
 
     Returns
     -------
@@ -606,7 +706,7 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
 
     Parameters
     ----------
-    run_key : str — "abstract" or "title"
+    run_key : str — "abstract" or "title" or "keywords"
 
     Returns
     -------
@@ -762,7 +862,7 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> dict:
 
     Parameters
     ----------
-    run_key   : str  — "abstract" or "title"
+    run_key   : str  — "abstract" or "title" or "keywords"
     theme_map : dict — {new_theme_name: [cluster_id, ...], ...}
                        Only approved topics need appear here.
 
@@ -882,7 +982,7 @@ def compare_with_taxonomy(run_key: str) -> dict:
 
     Parameters
     ----------
-    run_key : str — "abstract" or "title"
+    run_key : str — "abstract" or "title" or "keywords"
 
     Returns
     -------
@@ -935,11 +1035,9 @@ def compare_with_taxonomy(run_key: str) -> dict:
 @tool
 def generate_comparison_csv() -> dict:
     """
-    Side-by-side comparison of abstract-run vs title-run themes.
+    Side-by-side comparison of abstract/title/keywords theme mappings.
 
-    FIX ISSUE 1: title run is optional — no longer crashes if only the
-    abstract run has been completed. title_map defaults to [] when the
-    title taxonomy_map.json file does not exist.
+    Each run is optional. Missing runs produce empty columns.
 
     Returns
     -------
@@ -948,33 +1046,46 @@ def generate_comparison_csv() -> dict:
     """
     abstract_path = OUTPUT_DIR / "abstract" / "taxonomy_map.json"
     title_path    = OUTPUT_DIR / "title"    / "taxonomy_map.json"
+    keywords_path = OUTPUT_DIR / "keywords" / "taxonomy_map.json"
 
-    abstract_map = _load_json(abstract_path)
+    abstract_map = _load_json(abstract_path) if abstract_path.exists() else []
+    title_map    = _load_json(title_path) if title_path.exists() else []
+    keywords_map = _load_json(keywords_path) if keywords_path.exists() else []
 
-    # FIX ISSUE 1: guard against missing title run
-    title_map = (
-        _load_json(title_path)
-        if title_path.exists()
-        else []
-    )
-
-    def _row(a_theme: dict, t_theme: dict | None) -> dict:
+    if not (abstract_map or title_map or keywords_map):
         return {
-            "Abstract Theme":      a_theme.get("theme_name",   ""),
-            "Abstract PAJAIS":     a_theme.get("pajais_match",  ""),
-            "Abstract Confidence": a_theme.get("confidence",    0),
-            "Abstract Novel":      a_theme.get("is_novel",     False),
+            "csv_path": str(OUTPUT_DIR / "comparison.csv"),
+            "row_count": 0,
+            "columns": [],
+            "preview": [],
+            "error": (
+                "No taxonomy_map.json files found for abstract/title/keywords. "
+                "Run compare_with_taxonomy for at least one run first."
+            ),
+        }
+
+    def _row(a_theme: dict | None, t_theme: dict | None, k_theme: dict | None) -> dict:
+        return {
+            "Abstract Theme":      a_theme.get("theme_name",   "") if a_theme else "",
+            "Abstract PAJAIS":     a_theme.get("pajais_match",  "") if a_theme else "",
+            "Abstract Confidence": a_theme.get("confidence",    0) if a_theme else 0,
+            "Abstract Novel":      a_theme.get("is_novel",     False) if a_theme else False,
             "Title Theme":         t_theme.get("theme_name",   "") if t_theme else "",
             "Title PAJAIS":        t_theme.get("pajais_match",  "") if t_theme else "",
             "Title Confidence":    t_theme.get("confidence",    0)  if t_theme else 0,
             "Title Novel":         t_theme.get("is_novel",     False) if t_theme else False,
+            "Keywords Theme":      k_theme.get("theme_name",   "") if k_theme else "",
+            "Keywords PAJAIS":     k_theme.get("pajais_match",  "") if k_theme else "",
+            "Keywords Confidence": k_theme.get("confidence",    0) if k_theme else 0,
+            "Keywords Novel":      k_theme.get("is_novel",     False) if k_theme else False,
         }
 
-    max_len  = max(len(abstract_map), len(title_map)) if title_map else len(abstract_map)
+    max_len  = max(len(abstract_map), len(title_map), len(keywords_map), 1)
     padded_a = abstract_map + [{}] * (max_len - len(abstract_map))
     padded_t = title_map    + [{}] * (max_len - len(title_map))
+    padded_k = keywords_map + [{}] * (max_len - len(keywords_map))
 
-    rows = list(map(_row, padded_a, padded_t))
+    rows = list(map(_row, padded_a, padded_t, padded_k))
     df   = pd.DataFrame(rows)
 
     out_path = OUTPUT_DIR / "comparison.csv"
@@ -996,8 +1107,8 @@ _NARRATIVE_PROMPT = PromptTemplate.from_template(
     """You are an academic researcher writing a methodology and findings section.
 
 Write a 500-word academic narrative describing the thematic analysis results below.
-Structure: (1) methodology overview, (2) major themes found, (3) PAJAIS alignment,
-(4) novel contributions, (5) limitations.
+Structure: (1) methodology overview, (2) major themes found across runs,
+(3) PAJAIS alignment, (4) novel contributions, (5) limitations.
 
 Use formal academic English. Do NOT use bullet points.
 
@@ -1006,6 +1117,9 @@ Abstract themes & taxonomy:
 
 Title themes & taxonomy:
 {title_themes}
+
+Keywords themes & taxonomy:
+{keywords_themes}
 
 Respond with plain text only.
 """
@@ -1019,18 +1133,32 @@ def export_narrative(run_key: str) -> dict:
 
     Parameters
     ----------
-    run_key : str — "abstract" or "title" (primary source)
+    run_key : str — "abstract" or "title" or "keywords" (primary source)
 
     Returns
     -------
     dict with keys:
         narrative_path, word_count, preview (first 300 chars)
     """
-    rdir       = _run_dir(run_key)
-    title_path = OUTPUT_DIR / "title" / "taxonomy_map.json"
+    rdir          = _run_dir(run_key)
+    abstract_path = OUTPUT_DIR / "abstract" / "taxonomy_map.json"
+    title_path    = OUTPUT_DIR / "title" / "taxonomy_map.json"
+    keywords_path = OUTPUT_DIR / "keywords" / "taxonomy_map.json"
 
-    abstract_map = _load_json(OUTPUT_DIR / "abstract" / "taxonomy_map.json")
+    abstract_map = _load_json(abstract_path) if abstract_path.exists() else []
     title_map    = _load_json(title_path) if title_path.exists() else []
+    keywords_map = _load_json(keywords_path) if keywords_path.exists() else []
+
+    if not (abstract_map or title_map or keywords_map):
+        return {
+            "narrative_path": str(rdir / "narrative.txt"),
+            "word_count": 0,
+            "preview": "",
+            "error": (
+                "No taxonomy mappings found for abstract/title/keywords. "
+                "Run compare_with_taxonomy before export_narrative."
+            ),
+        }
 
     def _theme_summary(t: dict) -> str:
         return (
@@ -1040,11 +1168,13 @@ def export_narrative(run_key: str) -> dict:
 
     abstract_str = "\n".join(map(_theme_summary, abstract_map))
     title_str    = "\n".join(map(_theme_summary, title_map)) or "Not run."
+    keywords_str = "\n".join(map(_theme_summary, keywords_map)) or "Not run."
 
     chain    = _NARRATIVE_PROMPT | _llm()
     response = _invoke_with_retries(lambda: chain.invoke({
         "abstract_themes": abstract_str,
         "title_themes":    title_str,
+        "keywords_themes": keywords_str,
     }))
 
     narrative = response.content if hasattr(response, "content") else str(response)

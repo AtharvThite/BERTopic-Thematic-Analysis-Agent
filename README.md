@@ -9,6 +9,7 @@ The system combines:
 - LangGraph ReAct orchestration
 - Mistral topic labeling by default
 - Optional Phase 2 `VERIFY` command to add Groq labels for side-by-side comparison
+- Optional `keywords` run using Author Keywords terms
 - Mistral for taxonomy mapping and narrative generation
 
 ## Highlights
@@ -74,6 +75,7 @@ Required columns:
 
 - `Title`
 - `Abstract`
+- `Author Keywords` (optional but required for `run keywords`)
 
 Additional columns are allowed.
 
@@ -82,15 +84,17 @@ Additional columns are allowed.
 1. Upload a CSV in the Data Input panel.
 2. The app auto-triggers Phase 1 context once upload succeeds.
 3. In chat, start discovery with `run abstract`.
-4. At Phase 2, optionally type `VERIFY` in chat to add Groq labels.
-5. Review generated topics in the Review tab (`Mistral Label` and `Groq Label`).
-6. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
-7. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
-8. Use Charts and Downloads tabs for visual and file outputs.
+4. Optionally run other corpora with `run title` and `run keywords`.
+5. At Phase 2, optionally type `VERIFY` in chat to add Groq labels.
+6. Review generated topics in the Review tab (`Mistral Label` and `Groq Label`).
+7. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
+8. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
+9. Use Charts and Downloads tabs for visual and file outputs.
 
 ## Useful Chat Prompts
 
 - `run abstract`
+- `run keywords`
 - `VERIFY`
 - `run title`
 - `show topics`
@@ -128,6 +132,21 @@ Common outputs include:
 - `outputs/abstract/topwords.html`
 - `outputs/abstract/hierarchy.html`
 - `outputs/abstract/heatmap.html`
+
+When keyword analysis is executed:
+
+- `outputs/keywords/sentences.json`
+- `outputs/keywords/emb.npy`
+- `outputs/keywords/sent_labels.npy`
+- `outputs/keywords/summaries.json`
+- `outputs/keywords/labels.json`
+- `outputs/keywords/themes.json`
+- `outputs/keywords/taxonomy_map.json`
+- `outputs/keywords/narrative.txt`
+- `outputs/keywords/intertopic.html`
+- `outputs/keywords/topwords.html`
+- `outputs/keywords/hierarchy.html`
+- `outputs/keywords/heatmap.html`
 
 Equivalent files are produced under `outputs/title/` when title-run analysis is executed.
 

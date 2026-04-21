@@ -819,9 +819,11 @@ def build_app() -> gr.Blocks:
                 gr.HTML("""
                 <div style='font-size:0.72rem;color:var(--text-muted);line-height:1.7;'>
                     <b style='color:var(--text-secondary);'>Expected columns</b><br>
-                    Title, Abstract, Authors, Year<br><br>
+                    Title, Abstract, Author Keywords, Authors, Year<br><br>
                     <b style='color:var(--text-secondary);'>Quick commands</b><br>
                     <code style='font-family:var(--font-mono);'>run abstract</code><br>
+                    <code style='font-family:var(--font-mono);'>run title</code><br>
+                    <code style='font-family:var(--font-mono);'>run keywords</code><br>
                     <code style='font-family:var(--font-mono);'>verify</code><br>
                     <code style='font-family:var(--font-mono);'>show topics</code><br>
                     <code style='font-family:var(--font-mono);'>export results</code>
@@ -840,7 +842,7 @@ def build_app() -> gr.Blocks:
 
                 with gr.Row(elem_id="chat-input-row"):
                     chat_input = gr.Textbox(
-                        placeholder='Type a command, e.g. "run abstract" ...',
+                        placeholder='Type a command, e.g. "run abstract" or "run keywords" ...',
                         show_label=False,
                         lines=1,
                         scale=5,

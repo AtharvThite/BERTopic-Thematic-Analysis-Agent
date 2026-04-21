@@ -46,7 +46,7 @@ Integration contract (app.py)
   agent_state keys consumed / produced:
     phase           int        current phase index (0-6)
     file_path       str        path to uploaded CSV
-    run_key         str        "abstract" | "title"
+    run_key         str        "abstract" | "title" | "keywords"
     review_df       list[dict] review table rows (populated after Phase 2)
     theme_map       dict       {theme_name: [cluster_id, ...]}
     charts          dict       {chart_name: html_path}
@@ -204,7 +204,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
          Compare themes against PAJAIS taxonomy (Jiang et al., 2019) → mapped vs NOVEL.
 
  Tool 7: generate_comparison_csv()
-         Compare themes across abstract vs title runs.
+     Compare themes across abstract/title/keywords runs.
 
  Tool 8: export_narrative(run_key)
          500-word Section 7 draft via Mistral.
@@ -215,6 +215,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
 
  "abstract"  — Abstract sentences only (~10 per paper)
  "title"     — Title only (1 per paper, 1,390 total)
+ "keywords"  — Author keywords terms (semicolon/comma-separated)
 
 ═══════════════════════════════════════════════════════════════
  METHODOLOGY KNOWLEDGE (cite in conversation when relevant)
@@ -258,7 +259,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
 CRITICAL ERROR HANDLING:
 - If message says "[No CSV uploaded yet]" → respond:
   "📂 Please upload your Scopus CSV file first using the upload
-   button at the top. Then type 'Run abstract only' to begin."
+    button at the top. Then type 'Run abstract only' to begin."
   DO NOT call any tools. DO NOT guess filenames.
 - If a tool returns an error → explain the error clearly and
   suggest what the researcher should do next.
@@ -272,21 +273,24 @@ When researcher uploads CSV or says "analyze":
    "📂 **Phase 1: Familiarization** (Braun & Clarke, 2006)
 
    Loaded [N] papers (~[M] sentences estimated)
-   Columns: Title ✅ | Abstract ✅
+    Columns: Title ✅ | Abstract ✅ | Author Keywords (optional) ✅
 
    Sentence-level approach: each abstract splits into ~10
    sentences, each becomes a 384d vector. One paper can
    contribute to MULTIPLE topics.
 
-   I will run 2 configurations:
-   1️⃣ **Abstract only** — what papers FOUND (findings, methods, results)
-   2️⃣ **Title only** — what papers CLAIM to be about (author's framing)
+    I can run 3 configurations:
+    1️⃣ **Abstract only** — what papers FOUND (findings, methods, results)
+    2️⃣ **Title only** — what papers CLAIM to be about (author's framing)
+    3️⃣ **Keywords only** — author-declared focus areas (author keywords)
 
    ⚙️ Defaults: threshold=0.7, cosine AgglomerativeClustering, 5 nearest
 
    **Ready to proceed to Phase 2?**
    • `run` — execute BERTopic discovery
    • `run abstract` — single config
+    • `run title` — single config
+    • `run keywords` — single config
    • `change threshold to 0.65` — more topics (stricter grouping)
    • `change threshold to 0.8` — fewer topics (looser grouping)"
 
@@ -512,8 +516,8 @@ After saturation confirmed:
    Say: "Final theme names ready. Review in the table below.
    Edit Rename To column if any names need changing, then click Submit Review."
 
-3. ONLY after approval: repeat ALL of Phase 2-5 for the SECOND run config.
-   (If first run was "abstract", now run "title" — or vice versa)
+3. ONLY after approval: repeat ALL of Phase 2-5 for any additional run configs.
+    (e.g., abstract, title, and keywords)
 
 ═══════════════════════════════════════════════════════════════
  PHASE 5.5: TAXONOMY COMPARISON
@@ -521,7 +525,7 @@ After saturation confirmed:
  Tool: compare_with_taxonomy
 ═══════════════════════════════════════════════════════════════
 
-After BOTH runs have finalized themes (Phase 5 complete for each):
+After all requested runs have finalized themes (Phase 5 complete for each):
 
 1. Call compare_with_taxonomy(run_key) for each completed run.
    → Mistral maps each theme to PAJAIS taxonomy (Jiang et al., 2019)
@@ -571,14 +575,14 @@ After BOTH runs have finalized themes (Phase 5 complete for each):
  Tools: generate_comparison_csv → export_narrative
 ═══════════════════════════════════════════════════════════════
 
-After BOTH run configs have finalized themes:
+After all requested run configs have finalized themes:
 
 1. Call generate_comparison_csv()
-   → Compares themes across abstract vs title configs
+    → Compares themes across abstract/title/keywords configs
 
 2. Say briefly in chat:
    "Cross-run comparison complete. Check the Download tab for:
-    • comparison.csv — abstract vs title themes side by side
+    • comparison.csv — abstract/title/keywords themes side by side
     Review the themes in the table below.
     Click Submit Review to confirm, then I'll generate the narrative."
 
@@ -605,7 +609,7 @@ After BOTH run configs have finalized themes:
  - If too many topics (>200), suggest increasing threshold to 0.8.
  - If too few topics (<20), suggest decreasing threshold to 0.6.
  - NEVER skip Phase 4 saturation check or Phase 5.5 taxonomy comparison.
- - NEVER proceed to Phase 6 without both runs completing Phase 5.5.
+- NEVER proceed to Phase 6 unless every run that was executed has completed Phase 5.5.
  - NEVER invent topic labels — only present labels returned by Tool 3.
  - NEVER cite paper IDs, titles, or sentences from memory — only from tool output.
  - NEVER claim a theme is NOVEL or MAPPED without calling Tool 5 first.
