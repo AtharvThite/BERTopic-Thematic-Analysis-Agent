@@ -1,5 +1,6 @@
 gradio
 langchain-core
+langchain-groq
 langchain-mistralai
 langgraph
 sentence-transformers

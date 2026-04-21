@@ -1,7 +1,7 @@
 """
 tools.py — BERTopic Thematic Analysis Pipeline Tools
 =====================================================
-Seven LangChain @tool functions implementing Braun & Clarke's (2006)
+Eight LangChain @tool functions implementing Braun & Clarke's (2006)
 six-phase thematic analysis pipeline.
 
 Conventions
@@ -56,12 +56,19 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_mistralai import ChatMistralAI
 
+try:
+    from langchain_groq import ChatGroq  # type: ignore[import-not-found]
+except ImportError:
+    ChatGroq = None
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 MISTRAL_API_KEY: str   = os.environ.get("MISTRAL_API_KEY", "")
 MODEL_NAME:      str   = "mistral-small-latest"
+GROQ_API_KEY: str      = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL_NAME: str   = os.environ.get("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
 EMBED_MODEL:     str   = "all-MiniLM-L6-v2"
 BASE_DIR:        Path  = Path(__file__).resolve().parent
 OUTPUT_DIR:      Path  = BASE_DIR / "outputs"
@@ -185,8 +192,34 @@ def _llm() -> ChatMistralAI:
     )
 
 
+def _llm_groq():
+    if ChatGroq is None:
+        raise RuntimeError(
+            "langchain-groq is not installed. Install dependencies from requirements.txt "
+            "to enable Groq topic-label verification."
+        )
+    return ChatGroq(
+        model=GROQ_MODEL_NAME,
+        api_key=GROQ_API_KEY,
+        temperature=0.2,
+        timeout=LLM_TIMEOUT_S,
+        max_retries=LLM_MAX_RETRIES,
+    )
+
+
+def _groq_enabled() -> bool:
+    return bool(GROQ_API_KEY) and ChatGroq is not None
+
+
+def _to_float(value: object, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
 def _is_transient_provider_error(exc: Exception) -> bool:
-    """Detect transient Mistral outages that should be retried."""
+    """Detect transient provider outages (Mistral/Groq) that should be retried."""
     msg = str(exc).lower()
     return (
         "unreachable_backend" in msg
@@ -195,6 +228,13 @@ def _is_transient_provider_error(exc: Exception) -> bool:
         or '"raw_status_code":503' in msg
         or '"raw_status_code":502' in msg
         or '"raw_status_code":504' in msg
+        or '"status":503' in msg
+        or '"status":502' in msg
+        or '"status":504' in msg
+        or '"status":429' in msg
+        or "too many requests" in msg
+        or "rate limit" in msg
+        or "gateway timeout" in msg
         or "service unavailable" in msg
     )
 
@@ -458,7 +498,7 @@ Respond with RAW JSON only. No markdown, no explanation outside the JSON.
 @tool
 def label_topics_with_llm(run_key: str) -> dict:
     """
-    Send each cluster's evidence sentences to Mistral and obtain structured labels.
+    Label each cluster with Mistral only (default Phase 2 labeling pass).
 
     Parameters
     ----------
@@ -495,18 +535,37 @@ def label_topics_with_llm(run_key: str) -> dict:
     )
     selected = ranked[:MAX_LABEL_CLUSTERS]
 
-    chain = _LABEL_PROMPT | _llm() | JsonOutputParser()
+    chain_mistral = _LABEL_PROMPT | _llm() | JsonOutputParser()
+
+    def _evidence_block(summary: dict) -> str:
+        return "\n".join(
+            f"  {i+1}. {s}"
+            for i, s in enumerate(summary["evidence"])
+        )
 
     def _label_one(summary: dict) -> dict:
-        result = _invoke_with_retries(lambda: chain.invoke({
+        result = _invoke_with_retries(lambda: chain_mistral.invoke({
             "cluster_id": summary["cluster_id"],
             "size":       summary["size"],
-            "evidence":   "\n".join(
-                              f"  {i+1}. {s}"
-                              for i, s in enumerate(summary["evidence"])
-                          ),
+            "evidence":   _evidence_block(summary),
         }))
-        return {**summary, **result}
+
+        return {
+            **summary,
+            **result,
+            "mistral_label":      result.get("label", ""),
+            "mistral_category":   result.get("category", ""),
+            "mistral_confidence": _to_float(result.get("confidence"), 0.0),
+            "mistral_reasoning":  result.get("reasoning", ""),
+            "mistral_niche":      bool(result.get("niche", False)),
+            "groq_label":         "",
+            "groq_category":      "",
+            "groq_confidence":    0.0,
+            "groq_reasoning":     "",
+            "groq_niche":         False,
+            "verification_done":  False,
+            "verification_note":  "Run VERIFY in Phase 2 to compare with Groq labels.",
+        }
 
     labelled = list(map(_label_one, selected))
     _save_json(rdir / "labels.json", labelled)
@@ -515,23 +574,179 @@ def label_topics_with_llm(run_key: str) -> dict:
     preview = list(map(
         lambda r: {
             "cluster_id": r.get("cluster_id"),
-            "label":      r.get("label"),
-            "category":   r.get("category"),
-            "confidence": r.get("confidence"),
-            "size":       r.get("size"),
-            "niche":      r.get("niche", False),
+            "label":         r.get("label"),
+            "category":      r.get("category"),
+            "confidence":    r.get("confidence"),
+            "mistral_label": r.get("mistral_label", ""),
+            "groq_label":    r.get("groq_label", ""),
+            "size":          r.get("size"),
+            "niche":         r.get("niche", False),
         },
         labelled[:MAX_TOOL_RETURN_PREVIEW],
     ))
 
     return {
-        "run_key":        run_key,
-        "labels_path":    str(rdir / "labels.json"),
-        "labelled_count": len(labelled),
-        "total_clusters": len(summaries),
+        "run_key":           run_key,
+        "labels_path":       str(rdir / "labels.json"),
+        "labelled_count":    len(labelled),
+        "total_clusters":    len(summaries),
         "selected_clusters": len(selected),
-        "skipped_clusters": max(0, len(summaries) - len(selected)),
-        "labels_preview": preview,
+        "skipped_clusters":  max(0, len(summaries) - len(selected)),
+        "groq_enabled":      _groq_enabled(),
+        "mode_note":         "Single-model labeling complete (Mistral). Send VERIFY in Phase 2 to run Groq verification.",
+        "labels_preview":    preview,
+    }
+
+
+@tool
+def verify_topic_labels_with_groq(run_key: str) -> dict:
+    """
+    Run Groq topic labeling for already-labeled topics and append comparison fields
+    into labels.json so UI review table can show both Mistral and Groq labels.
+
+    Parameters
+    ----------
+    run_key : str — "abstract" or "title"
+
+    Returns
+    -------
+    dict with keys:
+        run_key, labels_path, verification_path, verified_count, labels_preview
+    """
+    rdir          = _run_dir(run_key)
+    labels_path   = rdir / "labels.json"
+    summaries_path = rdir / "summaries.json"
+
+    if not _groq_enabled():
+        return {
+            "run_key": run_key,
+            "labels_path": str(labels_path),
+            "verified_count": 0,
+            "labels_preview": [],
+            "error": (
+                "GROQ_API_KEY is missing or langchain-groq is unavailable. "
+                "Set GROQ_API_KEY and install requirements to use VERIFY."
+            ),
+        }
+
+    if not labels_path.exists():
+        return {
+            "run_key": run_key,
+            "labels_path": str(labels_path),
+            "verified_count": 0,
+            "labels_preview": [],
+            "error": (
+                f"Missing labels artifact: {labels_path}. "
+                "Run label_topics_with_llm first."
+            ),
+        }
+
+    if not summaries_path.exists():
+        return {
+            "run_key": run_key,
+            "labels_path": str(labels_path),
+            "verified_count": 0,
+            "labels_preview": [],
+            "error": (
+                f"Missing summaries artifact: {summaries_path}. "
+                "Run run_bertopic_discovery first."
+            ),
+        }
+
+    labels_data = _load_json(labels_path)
+    summaries = _load_json(summaries_path)
+    summary_by_id = {
+        int(s.get("cluster_id", -1)): s
+        for s in summaries
+    }
+
+    target_rows = list(filter(
+        lambda r: int(r.get("cluster_id", -1)) in summary_by_id,
+        labels_data,
+    ))
+
+    chain_groq = _LABEL_PROMPT | _llm_groq() | JsonOutputParser()
+
+    def _evidence_block(summary: dict) -> str:
+        return "\n".join(
+            f"  {i+1}. {s}"
+            for i, s in enumerate(summary.get("evidence", []))
+        )
+
+    def _label_with_groq(row: dict) -> tuple[int, dict]:
+        cid = int(row.get("cluster_id", -1))
+        summary = summary_by_id[cid]
+        result = _invoke_with_retries(lambda: chain_groq.invoke({
+            "cluster_id": summary["cluster_id"],
+            "size":       summary["size"],
+            "evidence":   _evidence_block(summary),
+        }))
+        return cid, result
+
+    groq_pairs = list(map(_label_with_groq, target_rows))
+    groq_by_id = {cid: data for cid, data in groq_pairs}
+
+    def _merge_row(row: dict) -> dict:
+        cid = int(row.get("cluster_id", -1))
+        groq = groq_by_id.get(cid, {})
+        has_groq = bool(groq)
+        mistral_label = str(row.get("mistral_label") or row.get("label", "")).strip()
+        groq_label = str(groq.get("label", "")).strip()
+        is_agreement = (
+            mistral_label.lower() == groq_label.lower()
+            if has_groq and mistral_label and groq_label
+            else False
+        )
+
+        return {
+            **row,
+            "mistral_label":      mistral_label,
+            "mistral_category":   row.get("mistral_category") or row.get("category", ""),
+            "mistral_confidence": _to_float(
+                row.get("mistral_confidence", row.get("confidence", 0.0)),
+                0.0,
+            ),
+            "mistral_reasoning":  row.get("mistral_reasoning") or row.get("reasoning", ""),
+            "mistral_niche":      bool(row.get("mistral_niche", row.get("niche", False))),
+            "groq_label":         groq.get("label", ""),
+            "groq_category":      groq.get("category", ""),
+            "groq_confidence":    _to_float(groq.get("confidence"), 0.0),
+            "groq_reasoning":     groq.get("reasoning", ""),
+            "groq_niche":         bool(groq.get("niche", False)),
+            "verification_done":  has_groq,
+            "verification_note": (
+                "Mistral and Groq labels match."
+                if is_agreement
+                else "Mistral and Groq labels differ. Review before approval."
+            )
+            if has_groq
+            else "Groq labeling unavailable for this topic.",
+        }
+
+    verified_rows = list(map(_merge_row, labels_data))
+    verification_path = rdir / "labels_verification.json"
+    _save_json(labels_path, verified_rows)
+    _save_json(verification_path, verified_rows)
+
+    preview = list(map(
+        lambda r: {
+            "cluster_id":    r.get("cluster_id"),
+            "mistral_label": r.get("mistral_label", ""),
+            "groq_label":    r.get("groq_label", ""),
+            "verification_note": r.get("verification_note", ""),
+        },
+        verified_rows[:MAX_TOOL_RETURN_PREVIEW],
+    ))
+
+    verified_count = sum(1 for row in verified_rows if row.get("groq_label"))
+
+    return {
+        "run_key":           run_key,
+        "labels_path":       str(labels_path),
+        "verification_path": str(verification_path),
+        "verified_count":    int(verified_count),
+        "labelled_count":    int(len(verified_rows)),
+        "labels_preview":    preview,
     }
 
 
@@ -851,6 +1066,7 @@ ALL_TOOLS = [
     load_scopus_csv,
     run_bertopic_discovery,
     label_topics_with_llm,
+    verify_topic_labels_with_groq,
     consolidate_into_themes,
     compare_with_taxonomy,
     generate_comparison_csv,

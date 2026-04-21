@@ -9,7 +9,7 @@ Architecture
 - LLM        : ChatMistralAI (mistral-small-latest, free tier)
 - Agent type : create_react_agent (LangGraph)
 - Memory     : MemorySaver (in-process checkpointing)
-- Tools      : 7 tools imported from tools.py
+- Tools      : 8 tools imported from tools.py
 - State      : agent_state dict flows through app.py <-> agent.invoke()
 
 Phase gating
@@ -79,6 +79,7 @@ from tools import (
     OUTPUT_DIR,
     _load_json,
     _run_dir,
+    verify_topic_labels_with_groq,
 )
 
 # ---------------------------------------------------------------------------
@@ -180,7 +181,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
      Do not modify spelling or punctuation of these markers.
 
 ═══════════════════════════════════════════════════════════════
- YOUR 7 TOOLS
+ YOUR 8 TOOLS
 ═══════════════════════════════════════════════════════════════
 
  Tool 1: load_scopus_csv(filepath)
@@ -190,18 +191,22 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
          Split → embed → AgglomerativeClustering cosine → centroid nearest 5 → Plotly charts.
 
  Tool 3: label_topics_with_llm(run_key)
-         5 nearest centroid sentences → Mistral → label + research area + confidence.
+     5 nearest centroid sentences → Mistral only → initial topic labels.
 
- Tool 4: consolidate_into_themes(run_key, theme_map)
+ Tool 4: verify_topic_labels_with_groq(run_key)
+     Run only when researcher types VERIFY at STOP GATE 1.
+     Adds Groq labels alongside Mistral labels for manual verification.
+
+ Tool 5: consolidate_into_themes(run_key, theme_map)
          Merge researcher-approved topic groups → recompute centroids → new evidence.
 
- Tool 5: compare_with_taxonomy(run_key)
+ Tool 6: compare_with_taxonomy(run_key)
          Compare themes against PAJAIS taxonomy (Jiang et al., 2019) → mapped vs NOVEL.
 
- Tool 6: generate_comparison_csv()
+ Tool 7: generate_comparison_csv()
          Compare themes across abstract vs title runs.
 
- Tool 7: export_narrative(run_key)
+ Tool 8: export_narrative(run_key)
          500-word Section 7 draft via Mistral.
 
 ═══════════════════════════════════════════════════════════════
@@ -290,7 +295,7 @@ When researcher uploads CSV or says "analyze":
 ═══════════════════════════════════════════════════════════════
  B&C PHASE 2: GENERATING INITIAL CODES
  "Systematically coding interesting features across the dataset"
- Tools: run_bertopic_discovery → label_topics_with_llm
+ Tools: run_bertopic_discovery → label_topics_with_llm (optional VERIFY)
 ═══════════════════════════════════════════════════════════════
 
 After researcher confirms:
@@ -305,8 +310,12 @@ After researcher confirms:
    → Saves embeddings + summaries checkpoints
 
 2. Immediately call label_topics_with_llm(run_key)
-   → Sends ALL topics with 5 evidence sentences to Mistral
-   → Returns: label + research area + confidence + niche
+    → Sends ALL topics with 5 evidence sentences to Mistral
+    → Returns: label + research area + confidence + niche
+    → Writes review table with Mistral labels by default
+    OPTIONAL: if researcher types `VERIFY` at STOP GATE 1,
+    call verify_topic_labels_with_groq(run_key) and refresh table with
+    both Mistral Label and Groq Label columns for side-by-side checking.
    NOTE: NO PACIS categories in Phase 2. PACIS comparison comes in Phase 5.5.
 
 3. Present CODED data with EVIDENCE under each topic:
@@ -328,6 +337,7 @@ After researcher confirms:
    📊 4 Plotly visualizations saved (download below)
 
    **Review these codes. Ready for Phase 3 (theme search)?**
+    • `VERIFY` — run Groq labels and compare with Mistral in the table
    • `approve` — codes look good, move to theme grouping
    • `re-run 0.65` — re-run with stricter threshold (more topics)
    • `re-run 0.8` — re-run with looser threshold (fewer topics)
@@ -588,6 +598,8 @@ After BOTH run configs have finalized themes:
  - ALWAYS cite B&C (2006) when discussing iteration or saturation.
  - ALWAYS cite Grootendorst (2022) when explaining cluster behavior.
  - ALWAYS call label_topics_with_llm before presenting topic labels.
+- ONLY call verify_topic_labels_with_groq when user explicitly says VERIFY
+    and the workflow is at STOP GATE 1 (post-Phase 2, pre-Phase 3).
  - ALWAYS call compare_with_taxonomy before claiming PAJAIS mappings.
  - Use threshold=0.7 as default (lower = more topics, higher = fewer).
  - If too many topics (>200), suggest increasing threshold to 0.8.
@@ -669,6 +681,7 @@ def _init_state(state: dict) -> dict:
         "output_files": [],
         "thread_id":    THREAD_PREFIX + uuid.uuid4().hex[:8],
         "stop_gate":    None,
+        "review_submitted": False,
         "context_resets": 0,
     }
     return {**defaults, **state}
@@ -801,6 +814,7 @@ def _collect_output_files(state: dict) -> list[str]:
     candidates = [
         str(rdir / "summaries.json"),
         str(rdir / "labels.json"),
+        str(rdir / "labels_verification.json"),
         str(rdir / "themes.json"),
         str(rdir / "taxonomy_map.json"),
         str(rdir / "narrative.txt"),
@@ -902,10 +916,21 @@ def _populate_review_df(state: dict) -> dict:
     Called whenever labels.json exists but state["review_df"] is still empty.
 
     Row schema matches REVIEW_COLUMNS in app.py:
-      "#", "Topic Label", "Top Evidence", "Sentences", "Papers",
-      "Approve", "Rename To", "Reasoning"
+      "#", "Topic Label", "Mistral Label", "Groq Label", "Top Evidence",
+      "Sentences", "Papers", "Approve", "Rename To", "Reasoning"
     """
     labels_path = OUTPUT_DIR / state.get("run_key", DEFAULT_RUN_KEY) / "labels.json"
+
+    def _reasoning_cell(row: dict) -> str:
+        base_reason = str(
+            row.get("mistral_reasoning")
+            or row.get("reasoning", "")
+        ).strip()
+        groq_reason = str(row.get("groq_reasoning", "")).strip()
+        verification_note = str(row.get("verification_note", "")).strip()
+        groq_line = f"Groq: {groq_reason}" if groq_reason else ""
+        parts = list(filter(None, [base_reason, groq_line, verification_note]))
+        return "\n".join(parts)
 
     return (
         {
@@ -913,13 +938,15 @@ def _populate_review_df(state: dict) -> dict:
             "review_df": list(map(
                 lambda r: {
                     "#":           r.get("cluster_id", 0),
-                    "Topic Label": r.get("label", ""),
+                    "Topic Label": r.get("label") or r.get("mistral_label", ""),
+                    "Mistral Label": r.get("mistral_label") or r.get("label", ""),
+                    "Groq Label":  r.get("groq_label", ""),
                     "Top Evidence":r["evidence"][0] if r.get("evidence") else "",
                     "Sentences":   r.get("size", 0),
                     "Papers":      "",
                     "Approve":     False,
-                    "Rename To":   r.get("label", ""),
-                    "Reasoning":   r.get("reasoning", ""),
+                    "Rename To":   r.get("label") or r.get("mistral_label", ""),
+                    "Reasoning":   _reasoning_cell(r),
                 },
                 _load_json(labels_path),
             )),
@@ -945,7 +972,7 @@ def _build_context_message(user_message: str, state: dict) -> str:
         "active_stop_gate":   state.get("stop_gate"),
         "file_path":          state.get("file_path"),
         "run_key":            state.get("run_key", DEFAULT_RUN_KEY),
-        "review_submitted":   bool(state.get("review_df")),
+        "review_submitted":   bool(state.get("review_submitted", False)),
         "theme_map_ready":    bool(state.get("theme_map")),
         "charts_available":   list(state.get("charts", {}).keys()),
         "output_files_count": len(state.get("output_files", [])),
@@ -967,16 +994,76 @@ def _preprocess_phase3(state: dict) -> tuple[str, dict]:
     inject it as a context annotation so the agent can call
     consolidate_into_themes() with the correct arguments.
 
-    Called only when stop_gate == GATE_POST_PHASE2 and review_df is non-empty.
+    Called only when stop_gate == GATE_POST_PHASE2 and review_submitted is true.
     """
     theme_map  = _parse_review_df(state.get("review_df", []))
-    state      = {**state, "theme_map": theme_map}
+    state      = {**state, "theme_map": theme_map, "review_submitted": False}
     annotation = (
         f"\n\n[SYSTEM: Review table submitted. "
         f"Parsed theme_map = {json.dumps(theme_map)}. "
         f"Proceed to Phase 3 and call consolidate_into_themes.]"
     )
     return annotation, state
+
+
+def _is_verify_command(user_message: str) -> bool:
+    text = str(user_message or "").strip().lower()
+    return (
+        text in {"verify", "verify labels", "verify topic labels", "verify topics"}
+        or text.startswith("verify ")
+    )
+
+
+def _handle_verify_command(state: dict) -> tuple[str, dict]:
+    """Run Groq verification only at Phase 2 stop gate and refresh review table."""
+    if state.get("stop_gate") != GATE_POST_PHASE2 or state.get("phase", 0) < 2:
+        return (
+            "VERIFY is only available at Phase 2 after initial codes are generated "
+            "(STOP GATE 1). Run Phase 2 first, then send VERIFY.",
+            state,
+        )
+
+    run_key = state.get("run_key", DEFAULT_RUN_KEY)
+
+    try:
+        result = verify_topic_labels_with_groq.invoke({"run_key": run_key})
+    except Exception as exc:
+        return (
+            f"VERIFY failed while calling Groq labeling: {exc}",
+            state,
+        )
+
+    if isinstance(result, dict) and result.get("error"):
+        return (
+            f"VERIFY could not run: {result.get('error')}",
+            state,
+        )
+
+    refreshed_state = {
+        **state,
+        "phase": max(state.get("phase", 0), 2),
+        "stop_gate": GATE_POST_PHASE2,
+        "review_df": [],
+        "review_submitted": False,
+    }
+    refreshed_state = {
+        **refreshed_state,
+        "charts": _extract_charts(run_key, refreshed_state),
+        "output_files": _collect_output_files(refreshed_state),
+    }
+    refreshed_state = _populate_review_df(refreshed_state)
+
+    verified_count = result.get("verified_count", 0) if isinstance(result, dict) else 0
+    labelled_count = result.get("labelled_count", 0) if isinstance(result, dict) else 0
+
+    reply = (
+        "VERIFY complete. Groq topic labeling has been added for Phase 2 topics.\n\n"
+        f"Verified topics: {verified_count}/{labelled_count}\n"
+        "The review table now shows both Mistral Label and Groq Label for each topic.\n"
+        "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
+        "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"
+    )
+    return reply, refreshed_state
 
 
 # ============================================================================
@@ -1016,13 +1103,16 @@ class ThematicAnalysisAgent:
                 state,
             )
 
+        if _is_verify_command(user_message):
+            return _handle_verify_command(state)
+
         thread_id = state["thread_id"]
         gate      = state.get("stop_gate")
 
         # FIX BUG 2 — single ternary, no dead lambda block before it
         extra_context, state = (
             _preprocess_phase3(state)
-            if (gate == GATE_POST_PHASE2 and state.get("review_df"))
+            if (gate == GATE_POST_PHASE2 and state.get("review_submitted"))
             else ("", state)
         )
 

@@ -76,14 +76,15 @@ PHASES = [
 CHART_OPTIONS = ["Intertopic Map", "Top Words", "Hierarchy", "Heatmap"]
 
 REVIEW_COLUMNS = [
-    "#", "Topic Label", "Top Evidence", "Sentences", "Papers",
-    "Approve", "Rename To", "Reasoning",
+    "#", "Topic Label", "Mistral Label", "Groq Label", "Top Evidence",
+    "Sentences", "Papers", "Approve", "Rename To", "Reasoning",
 ]
 
 EMPTY_REVIEW_DF = pd.DataFrame(columns=REVIEW_COLUMNS)
 
-# FIX ISSUE 4 — detect missing API key at startup
-API_KEY_MISSING = not bool(os.environ.get("MISTRAL_API_KEY", ""))
+# FIX ISSUE 4 — detect missing API keys at startup
+MISTRAL_KEY_MISSING = not bool(os.environ.get("MISTRAL_API_KEY", ""))
+GROQ_KEY_MISSING = not bool(os.environ.get("GROQ_API_KEY", ""))
 UPLOADS_DIR = Path("uploads")
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 
@@ -720,6 +721,7 @@ def submit_review(review_df, agent_state: dict, chat_history: list):
     """
     # Store the review table in state so agent.py can read it
     agent_state["review_df"] = review_df.to_dict(orient="records")
+    agent_state["review_submitted"] = True
 
     # Send a short trigger message — the agent reads state, not the payload
     msg = "Review table submitted. Please proceed to Phase 3 and consolidate themes."
@@ -773,12 +775,21 @@ def build_app() -> gr.Blocks:
         phase_bar = gr.HTML(value=build_phase_html(0), elem_id="phase-bar")
 
         # FIX ISSUE 4 — show warning banner when API key is missing
-        if API_KEY_MISSING:
+        if MISTRAL_KEY_MISSING:
             gr.HTML(
                 "<div class='api-warning'>"
                 "WARNING: MISTRAL_API_KEY is not set. "
                 "All LLM calls will fail. "
                 "Set it in HuggingFace Spaces: Settings -> Variables and secrets."
+                "</div>"
+            )
+
+        if GROQ_KEY_MISSING:
+            gr.HTML(
+                "<div class='api-warning'>"
+                "WARNING: GROQ_API_KEY is not set. "
+                "VERIFY command will be unavailable for Groq side-by-side topic checks. "
+                "Set it to enable Mistral + Groq verification in Phase 2."
                 "</div>"
             )
 
@@ -811,6 +822,7 @@ def build_app() -> gr.Blocks:
                     Title, Abstract, Authors, Year<br><br>
                     <b style='color:var(--text-secondary);'>Quick commands</b><br>
                     <code style='font-family:var(--font-mono);'>run abstract</code><br>
+                    <code style='font-family:var(--font-mono);'>verify</code><br>
                     <code style='font-family:var(--font-mono);'>show topics</code><br>
                     <code style='font-family:var(--font-mono);'>export results</code>
                 </div>""")
@@ -860,15 +872,16 @@ def build_app() -> gr.Blocks:
                         gr.HTML("""
                         <p style='font-size:0.78rem;color:var(--text-muted);margin:0 0 12px;'>
                             Edit <b>Approve</b>, <b>Rename To</b>, and <b>Reasoning</b> columns inline,
-                            then click <b>Submit Review</b>.
+                            then click <b>Submit Review</b>. Use <b>verify</b> in chat at Phase 2
+                            to populate <b>Mistral Label</b> and <b>Groq Label</b> for comparison.
                         </p>""")
 
                         review_table = gr.Dataframe(
                             value=EMPTY_REVIEW_DF.copy(),
                             headers=REVIEW_COLUMNS,
                             datatype=[
-                                "number", "str", "str", "number", "str",
-                                "bool",   "str", "str",
+                                "number", "str", "str", "str", "str",
+                                "number", "str", "bool", "str", "str",
                             ],
                             interactive=True,
                             wrap=False,
