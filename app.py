@@ -76,8 +76,8 @@ PHASES = [
 CHART_OPTIONS = ["Intertopic Map", "Top Words", "Hierarchy", "Heatmap"]
 
 REVIEW_COLUMNS = [
-    "#", "Topic Label", "Mistral Label", "Groq Label", "Top Evidence",
-    "Sentences", "Papers", "Approve", "Rename To", "Reasoning",
+    "#", "Topic Label", "Top Evidence", "Sentences", "Papers",
+    "Approve", "Rename To", "Reasoning",
 ]
 
 EMPTY_REVIEW_DF = pd.DataFrame(columns=REVIEW_COLUMNS)
@@ -875,15 +875,15 @@ def build_app() -> gr.Blocks:
                         <p style='font-size:0.78rem;color:var(--text-muted);margin:0 0 12px;'>
                             Edit <b>Approve</b>, <b>Rename To</b>, and <b>Reasoning</b> columns inline,
                             then click <b>Submit Review</b>. Use <b>verify</b> in chat at Phase 2
-                            to populate <b>Mistral Label</b> and <b>Groq Label</b> for comparison.
+                            to see Mistral vs Groq label comparison directly in chat output.
                         </p>""")
 
                         review_table = gr.Dataframe(
                             value=EMPTY_REVIEW_DF.copy(),
                             headers=REVIEW_COLUMNS,
                             datatype=[
-                                "number", "str", "str", "str", "str",
-                                "number", "str", "bool", "str", "str",
+                                "number", "str", "str", "number", "str",
+                                "bool", "str", "str",
                             ],
                             interactive=True,
                             wrap=False,

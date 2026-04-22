@@ -90,6 +90,7 @@ MODEL_NAME:      str = "mistral-small-latest"
 DEFAULT_RUN_KEY: str = "abstract"
 THREAD_PREFIX:   str = "TA-"
 MAX_USER_MESSAGE_CHARS: int = 4000
+VERIFY_CHAT_MAX_ROWS: int = 20
 PROVIDER_RETRY_ATTEMPTS: int = 3
 PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
 
@@ -195,7 +196,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
 
  Tool 4: verify_topic_labels_with_groq(run_key)
      Run only when researcher types VERIFY at STOP GATE 1.
-     Adds Groq labels alongside Mistral labels for manual verification.
+     Return Mistral vs Groq comparison in chat for manual verification.
 
  Tool 5: consolidate_into_themes(run_key, theme_map)
          Merge researcher-approved topic groups → recompute centroids → new evidence.
@@ -318,8 +319,8 @@ After researcher confirms:
     → Returns: label + research area + confidence + niche
     → Writes review table with Mistral labels by default
     OPTIONAL: if researcher types `VERIFY` at STOP GATE 1,
-    call verify_topic_labels_with_groq(run_key) and refresh table with
-    both Mistral Label and Groq Label columns for side-by-side checking.
+    call verify_topic_labels_with_groq(run_key) and present side-by-side
+    Mistral vs Groq label comparison directly in chat.
    NOTE: NO PACIS categories in Phase 2. PACIS comparison comes in Phase 5.5.
 
 3. Present CODED data with EVIDENCE under each topic:
@@ -341,7 +342,7 @@ After researcher confirms:
    📊 4 Plotly visualizations saved (download below)
 
    **Review these codes. Ready for Phase 3 (theme search)?**
-    • `VERIFY` — run Groq labels and compare with Mistral in the table
+    • `VERIFY` — run Groq labels and compare with Mistral in chat output
    • `approve` — codes look good, move to theme grouping
    • `re-run 0.65` — re-run with stricter threshold (more topics)
    • `re-run 0.8` — re-run with looser threshold (fewer topics)
@@ -920,21 +921,16 @@ def _populate_review_df(state: dict) -> dict:
     Called whenever labels.json exists but state["review_df"] is still empty.
 
     Row schema matches REVIEW_COLUMNS in app.py:
-      "#", "Topic Label", "Mistral Label", "Groq Label", "Top Evidence",
-      "Sentences", "Papers", "Approve", "Rename To", "Reasoning"
+            "#", "Topic Label", "Top Evidence", "Sentences", "Papers",
+            "Approve", "Rename To", "Reasoning"
     """
     labels_path = OUTPUT_DIR / state.get("run_key", DEFAULT_RUN_KEY) / "labels.json"
 
     def _reasoning_cell(row: dict) -> str:
-        base_reason = str(
-            row.get("mistral_reasoning")
-            or row.get("reasoning", "")
-        ).strip()
-        groq_reason = str(row.get("groq_reasoning", "")).strip()
-        verification_note = str(row.get("verification_note", "")).strip()
-        groq_line = f"Groq: {groq_reason}" if groq_reason else ""
-        parts = list(filter(None, [base_reason, groq_line, verification_note]))
-        return "\n".join(parts)
+                return str(
+                        row.get("mistral_reasoning")
+                        or row.get("reasoning", "")
+                ).strip()
 
     return (
         {
@@ -943,8 +939,6 @@ def _populate_review_df(state: dict) -> dict:
                 lambda r: {
                     "#":           r.get("cluster_id", 0),
                     "Topic Label": r.get("label") or r.get("mistral_label", ""),
-                    "Mistral Label": r.get("mistral_label") or r.get("label", ""),
-                    "Groq Label":  r.get("groq_label", ""),
                     "Top Evidence":r["evidence"][0] if r.get("evidence") else "",
                     "Sentences":   r.get("size", 0),
                     "Papers":      "",
@@ -1018,8 +1012,39 @@ def _is_verify_command(user_message: str) -> bool:
     )
 
 
+def _sanitize_markdown_cell(value: object, max_len: int = 64) -> str:
+    text = str(value or "").replace("\n", " ").replace("|", "/").strip()
+    return text if len(text) <= max_len else (text[: max_len - 1] + "…")
+
+
+def _build_verify_chat_report(rows: list[dict]) -> str:
+    if not rows:
+        return "No topic labels found to verify."
+
+    shown = rows[:VERIFY_CHAT_MAX_ROWS]
+    header = [
+        "| # | Mistral Label | Groq Label |",
+        "|---|---|---|",
+    ]
+    lines = list(map(
+        lambda r: (
+            f"| {int(r.get('cluster_id', 0))} "
+            f"| {_sanitize_markdown_cell(r.get('mistral_label') or r.get('label', ''))} "
+            f"| {_sanitize_markdown_cell(r.get('groq_label', ''))} |"
+        ),
+        shown,
+    ))
+
+    tail = (
+        f"\nShowing first {VERIFY_CHAT_MAX_ROWS} of {len(rows)} topics."
+        if len(rows) > VERIFY_CHAT_MAX_ROWS
+        else ""
+    )
+    return "\n".join(header + lines) + tail
+
+
 def _handle_verify_command(state: dict) -> tuple[str, dict]:
-    """Run Groq verification only at Phase 2 stop gate and refresh review table."""
+    """Run Groq verification only at Phase 2 stop gate and report in chat."""
     if state.get("stop_gate") != GATE_POST_PHASE2 or state.get("phase", 0) < 2:
         return (
             "VERIFY is only available at Phase 2 after initial codes are generated "
@@ -1059,11 +1084,14 @@ def _handle_verify_command(state: dict) -> tuple[str, dict]:
 
     verified_count = result.get("verified_count", 0) if isinstance(result, dict) else 0
     labelled_count = result.get("labelled_count", 0) if isinstance(result, dict) else 0
+    labels_rows = _load_json(OUTPUT_DIR / run_key / "labels.json")
+    report = _build_verify_chat_report(labels_rows)
 
     reply = (
         "VERIFY complete. Groq topic labeling has been added for Phase 2 topics.\n\n"
         f"Verified topics: {verified_count}/{labelled_count}\n"
-        "The review table now shows both Mistral Label and Groq Label for each topic.\n"
+        "Mistral vs Groq comparison is shown below in chat.\n\n"
+        f"{report}\n\n"
         "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
         "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"
     )

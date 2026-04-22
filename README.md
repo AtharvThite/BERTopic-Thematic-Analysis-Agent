@@ -85,8 +85,8 @@ Additional columns are allowed.
 2. The app auto-triggers Phase 1 context once upload succeeds.
 3. In chat, start discovery with `run abstract`.
 4. Optionally run other corpora with `run title` and `run keywords`.
-5. At Phase 2, optionally type `VERIFY` in chat to add Groq labels.
-6. Review generated topics in the Review tab (`Mistral Label` and `Groq Label`).
+5. At Phase 2, optionally type `VERIFY` in chat to display Mistral vs Groq label comparison in chat output.
+6. Review generated topics in the Review tab and approve/rename as needed.
 7. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
 8. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
 9. Use Charts and Downloads tabs for visual and file outputs.
