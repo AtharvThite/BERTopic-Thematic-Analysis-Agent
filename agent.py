@@ -9,7 +9,7 @@ Architecture
 - LLM        : ChatMistralAI (mistral-small-latest, free tier)
 - Agent type : create_react_agent (LangGraph)
 - Memory     : MemorySaver (in-process checkpointing)
-- Tools      : 8 tools imported from tools.py
+- Tools      : 9 tools imported from tools.py
 - State      : agent_state dict flows through app.py <-> agent.invoke()
 
 Phase gating
@@ -80,6 +80,7 @@ from tools import (
     _load_json,
     _run_dir,
     verify_topic_labels_with_groq,
+    verify_taxonomy_mapping_with_groq,
 )
 
 # ---------------------------------------------------------------------------
@@ -182,7 +183,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
      Do not modify spelling or punctuation of these markers.
 
 ═══════════════════════════════════════════════════════════════
- YOUR 8 TOOLS
+ YOUR 9 TOOLS
 ═══════════════════════════════════════════════════════════════
 
  Tool 1: load_scopus_csv(filepath)
@@ -204,10 +205,14 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
  Tool 6: compare_with_taxonomy(run_key)
          Compare themes against PAJAIS taxonomy (Jiang et al., 2019) → mapped vs NOVEL.
 
- Tool 7: generate_comparison_csv()
+ Tool 7: verify_taxonomy_mapping_with_groq(run_key)
+     Run only when researcher types VERIFY at STOP GATE 4.
+     Return Mistral vs Groq PAJAIS mapping comparison in chat.
+
+ Tool 8: generate_comparison_csv()
      Compare themes across abstract/title/keywords runs.
 
- Tool 8: export_narrative(run_key)
+ Tool 9: export_narrative(run_key)
          500-word Section 7 draft via Mistral.
 
 ═══════════════════════════════════════════════════════════════
@@ -555,6 +560,7 @@ After all requested runs have finalized themes (Phase 5 complete for each):
    extend beyond the established PAJAIS classification.
 
    **Researcher: Review this mapping.**
+    • `VERIFY` — run Groq PAJAIS verification and compare with Mistral in chat
    • `approve` — mapping is correct
    • `theme X should map to Y instead` — adjust
    • `merge novel themes into one` — consolidate emerging themes
@@ -605,6 +611,8 @@ After all requested run configs have finalized themes:
  - ALWAYS call label_topics_with_llm before presenting topic labels.
 - ONLY call verify_topic_labels_with_groq when user explicitly says VERIFY
     and the workflow is at STOP GATE 1 (post-Phase 2, pre-Phase 3).
+- ONLY call verify_taxonomy_mapping_with_groq when user explicitly says VERIFY
+    and the workflow is at STOP GATE 4 (post-Phase 5.5 mapping).
  - ALWAYS call compare_with_taxonomy before claiming PAJAIS mappings.
  - Use threshold=0.7 as default (lower = more topics, higher = fewer).
  - If too many topics (>200), suggest increasing threshold to 0.8.
@@ -822,6 +830,7 @@ def _collect_output_files(state: dict) -> list[str]:
         str(rdir / "labels_verification.json"),
         str(rdir / "themes.json"),
         str(rdir / "taxonomy_map.json"),
+        str(rdir / "taxonomy_verification.json"),
         str(rdir / "narrative.txt"),
         str(OUTPUT_DIR / "comparison.csv"),
     ]
@@ -1043,59 +1052,134 @@ def _build_verify_chat_report(rows: list[dict]) -> str:
     return "\n".join(header + lines) + tail
 
 
-def _handle_verify_command(state: dict) -> tuple[str, dict]:
-    """Run Groq verification only at Phase 2 stop gate and report in chat."""
-    if state.get("stop_gate") != GATE_POST_PHASE2 or state.get("phase", 0) < 2:
-        return (
-            "VERIFY is only available at Phase 2 after initial codes are generated "
-            "(STOP GATE 1). Run Phase 2 first, then send VERIFY.",
-            state,
-        )
+def _build_verify_taxonomy_chat_report(rows: list[dict]) -> str:
+    if not rows:
+        return "No PAJAIS mappings found to verify."
 
-    run_key = state.get("run_key", DEFAULT_RUN_KEY)
+    shown = rows[:VERIFY_CHAT_MAX_ROWS]
+    header = [
+        "| Theme | Mistral PAJAIS | Groq PAJAIS |",
+        "|---|---|---|",
+    ]
+    lines = list(map(
+        lambda r: (
+            f"| {_sanitize_markdown_cell(r.get('theme_name', ''), max_len=44)} "
+            f"| {_sanitize_markdown_cell(r.get('mistral_pajais_match') or r.get('pajais_match', ''), max_len=34)} "
+            f"| {_sanitize_markdown_cell(r.get('groq_pajais_match', ''), max_len=34)} |"
+        ),
+        shown,
+    ))
 
-    try:
-        result = verify_topic_labels_with_groq.invoke({"run_key": run_key})
-    except Exception as exc:
-        return (
-            f"VERIFY failed while calling Groq labeling: {exc}",
-            state,
-        )
-
-    if isinstance(result, dict) and result.get("error"):
-        return (
-            f"VERIFY could not run: {result.get('error')}",
-            state,
-        )
-
-    refreshed_state = {
-        **state,
-        "phase": max(state.get("phase", 0), 2),
-        "stop_gate": GATE_POST_PHASE2,
-        "review_df": [],
-        "review_submitted": False,
-    }
-    refreshed_state = {
-        **refreshed_state,
-        "charts": _extract_charts(run_key, refreshed_state),
-        "output_files": _collect_output_files(refreshed_state),
-    }
-    refreshed_state = _populate_review_df(refreshed_state)
-
-    verified_count = result.get("verified_count", 0) if isinstance(result, dict) else 0
-    labelled_count = result.get("labelled_count", 0) if isinstance(result, dict) else 0
-    labels_rows = _load_json(OUTPUT_DIR / run_key / "labels.json")
-    report = _build_verify_chat_report(labels_rows)
-
-    reply = (
-        "VERIFY complete. Groq topic labeling has been added for Phase 2 topics.\n\n"
-        f"Verified topics: {verified_count}/{labelled_count}\n"
-        "Mistral vs Groq comparison is shown below in chat.\n\n"
-        f"{report}\n\n"
-        "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
-        "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"
+    tail = (
+        f"\nShowing first {VERIFY_CHAT_MAX_ROWS} of {len(rows)} themes."
+        if len(rows) > VERIFY_CHAT_MAX_ROWS
+        else ""
     )
-    return reply, refreshed_state
+    return "\n".join(header + lines) + tail
+
+
+def _handle_verify_command(state: dict) -> tuple[str, dict]:
+    """Run Groq verification at supported stop gates and report in chat."""
+    gate = state.get("stop_gate")
+    phase = state.get("phase", 0)
+
+    if gate == GATE_POST_PHASE2 and phase >= 2:
+        run_key = state.get("run_key", DEFAULT_RUN_KEY)
+
+        try:
+            result = verify_topic_labels_with_groq.invoke({"run_key": run_key})
+        except Exception as exc:
+            return (
+                f"VERIFY failed while calling Groq labeling: {exc}",
+                state,
+            )
+
+        if isinstance(result, dict) and result.get("error"):
+            return (
+                f"VERIFY could not run: {result.get('error')}",
+                state,
+            )
+
+        refreshed_state = {
+            **state,
+            "phase": max(state.get("phase", 0), 2),
+            "stop_gate": GATE_POST_PHASE2,
+            "review_df": [],
+            "review_submitted": False,
+        }
+        refreshed_state = {
+            **refreshed_state,
+            "charts": _extract_charts(run_key, refreshed_state),
+            "output_files": _collect_output_files(refreshed_state),
+        }
+        refreshed_state = _populate_review_df(refreshed_state)
+
+        verified_count = result.get("verified_count", 0) if isinstance(result, dict) else 0
+        labelled_count = result.get("labelled_count", 0) if isinstance(result, dict) else 0
+        labels_rows = _load_json(OUTPUT_DIR / run_key / "labels.json")
+        report = _build_verify_chat_report(labels_rows)
+
+        reply = (
+            "VERIFY complete. Groq topic labeling has been added for Phase 2 topics.\n\n"
+            f"Verified topics: {verified_count}/{labelled_count}\n"
+            "Mistral vs Groq comparison is shown below in chat.\n\n"
+            f"{report}\n\n"
+            "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
+            "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"
+        )
+        return reply, refreshed_state
+
+    if gate == GATE_POST_PHASE55 and phase >= 6:
+        run_key = state.get("run_key", DEFAULT_RUN_KEY)
+
+        try:
+            result = verify_taxonomy_mapping_with_groq.invoke({"run_key": run_key})
+        except Exception as exc:
+            return (
+                f"VERIFY failed while calling Groq PAJAIS verification: {exc}",
+                state,
+            )
+
+        if isinstance(result, dict) and result.get("error"):
+            return (
+                f"VERIFY could not run: {result.get('error')}",
+                state,
+            )
+
+        refreshed_state = {
+            **state,
+            "phase": max(state.get("phase", 0), 6),
+            "stop_gate": GATE_POST_PHASE55,
+            "review_submitted": False,
+        }
+        refreshed_state = {
+            **refreshed_state,
+            "charts": _extract_charts(run_key, refreshed_state),
+            "output_files": _collect_output_files(refreshed_state),
+        }
+
+        verified_count = result.get("verified_count", 0) if isinstance(result, dict) else 0
+        mapped_count = result.get("mapped_count", 0) if isinstance(result, dict) else 0
+        taxonomy_rows = _load_json(OUTPUT_DIR / run_key / "taxonomy_map.json")
+        report = _build_verify_taxonomy_chat_report(taxonomy_rows)
+
+        reply = (
+            "VERIFY complete. Groq PAJAIS verification has been added for current themes.\n\n"
+            f"Verified themes: {verified_count}/{mapped_count}\n"
+            "Mistral vs Groq PAJAIS comparison is shown below in chat.\n\n"
+            f"{report}\n\n"
+            "Review the taxonomy mapping decision and continue when ready.\n\n"
+            "[STOP GATE 4 — AWAITING TAXONOMY REVIEW]"
+        )
+        return reply, refreshed_state
+
+    return (
+        "VERIFY is only available at two stages:\n"
+        "1) Phase 2 (STOP GATE 1) for topic-label verification\n"
+        "2) Phase 5.5 (STOP GATE 4) for PAJAIS mapping verification\n"
+        "Run the corresponding phase first, then send VERIFY.",
+        state,
+    )
 
 
 # ============================================================================

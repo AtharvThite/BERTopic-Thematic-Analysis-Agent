@@ -7,8 +7,8 @@ The system combines:
 - Sentence-BERT embeddings (`all-MiniLM-L6-v2`)
 - Agglomerative clustering for topic discovery
 - LangGraph ReAct orchestration
-- Mistral topic labeling by default
-- Optional Phase 2 `VERIFY` command to add Groq labels for side-by-side comparison
+- Mistral topic labeling and PAJAIS mapping by default
+- Optional `VERIFY` command for Groq side-by-side validation at Phase 2 and Phase 5.5
 - Optional `keywords` run using Author Keywords terms
 - Mistral for taxonomy mapping and narrative generation
 
@@ -24,7 +24,7 @@ The system combines:
 
 - `app.py` - Gradio UI, event wiring, chart embedding, downloads panel
 - `agent.py` - phase-gated LangGraph agent and state transitions
-- `tools.py` - eight analysis tools used by the agent
+- `tools.py` - nine analysis tools used by the agent
 - `requirements.txt` - Python dependencies
 - `uploads/` - persisted uploaded CSV files
 - `outputs/` - generated artifacts and charts
@@ -49,7 +49,7 @@ Set in the same shell where you run the app:
 
 ```bash
 export MISTRAL_API_KEY="your-mistral-api-key"
-export GROQ_API_KEY="your-groq-api-key"       # enables Phase 2 VERIFY (Groq label comparison)
+export GROQ_API_KEY="your-groq-api-key"       # enables VERIFY for labels and PAJAIS mapping
 export HF_TOKEN="your-hf-token"  # optional but recommended for model downloads
 
 # Optional: Groq model for VERIFY command
@@ -85,7 +85,7 @@ Additional columns are allowed.
 2. The app auto-triggers Phase 1 context once upload succeeds.
 3. In chat, start discovery with `run abstract`.
 4. Optionally run other corpora with `run title` and `run keywords`.
-5. At Phase 2, optionally type `VERIFY` in chat to display Mistral vs Groq label comparison in chat output.
+5. At Phase 2, optionally type `VERIFY` in chat to display Mistral vs Groq topic-label comparison in chat output.
 6. Review generated topics in the Review tab and approve/rename as needed.
 7. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
 8. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
@@ -111,8 +111,9 @@ The agent is robust to natural-language variants, but short explicit prompts are
 4. `verify_topic_labels_with_groq(run_key)`
 5. `consolidate_into_themes(run_key, theme_map)`
 6. `compare_with_taxonomy(run_key)`
-7. `generate_comparison_csv()`
-8. `export_narrative(run_key)`
+7. `verify_taxonomy_mapping_with_groq(run_key)`
+8. `generate_comparison_csv()`
+9. `export_narrative(run_key)`
 
 ## Output Artifacts
 
@@ -181,7 +182,8 @@ Restart the app after setting it.
 
 ### GROQ key missing
 
-Without `GROQ_API_KEY`, topic labeling still runs with Mistral, but `VERIFY` cannot run.
+Without `GROQ_API_KEY`, topic labeling and PAJAIS mapping still run with Mistral,
+but `VERIFY` cannot run.
 
 ```bash
 export GROQ_API_KEY="your-groq-api-key"

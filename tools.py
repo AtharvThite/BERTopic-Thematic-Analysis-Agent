@@ -1,7 +1,7 @@
 """
 tools.py — BERTopic Thematic Analysis Pipeline Tools
 =====================================================
-Eight LangChain @tool functions implementing Braun & Clarke's (2006)
+Nine LangChain @tool functions implementing Braun & Clarke's (2006)
 six-phase thematic analysis pipeline.
 
 Conventions
@@ -23,7 +23,7 @@ Fixes applied (v2)
 
 Dependencies
 ------------
-    pip install langchain langchain-core langchain-mistralai
+    pip install langchain langchain-core langchain-mistralai langchain-groq
                 sentence-transformers scikit-learn plotly pandas numpy
 """
 
@@ -1028,6 +1028,140 @@ def compare_with_taxonomy(run_key: str) -> dict:
     }
 
 
+@tool
+def verify_taxonomy_mapping_with_groq(run_key: str) -> dict:
+    """
+    Run Groq validation for PAJAIS taxonomy mappings and persist side-by-side
+    Mistral/Groq mapping fields for each theme.
+
+    Parameters
+    ----------
+    run_key : str — "abstract" or "title" or "keywords"
+
+    Returns
+    -------
+    dict with keys:
+        run_key, taxonomy_path, verification_path,
+        verified_count, mapping_preview
+    """
+    if not _groq_enabled():
+        return {
+            "run_key": run_key,
+            "taxonomy_path": str(_run_dir(run_key) / "taxonomy_map.json"),
+            "verified_count": 0,
+            "mapping_preview": [],
+            "error": (
+                "GROQ_API_KEY is missing or langchain-groq is unavailable. "
+                "Set GROQ_API_KEY and install requirements to use VERIFY."
+            ),
+        }
+
+    rdir          = _run_dir(run_key)
+    themes_path   = rdir / "themes.json"
+    taxonomy_path = rdir / "taxonomy_map.json"
+
+    if not themes_path.exists():
+        return {
+            "run_key": run_key,
+            "taxonomy_path": str(taxonomy_path),
+            "verified_count": 0,
+            "mapping_preview": [],
+            "error": (
+                f"Missing themes artifact: {themes_path}. "
+                "Run consolidate_into_themes first."
+            ),
+        }
+
+    if not taxonomy_path.exists():
+        return {
+            "run_key": run_key,
+            "taxonomy_path": str(taxonomy_path),
+            "verified_count": 0,
+            "mapping_preview": [],
+            "error": (
+                f"Missing taxonomy artifact: {taxonomy_path}. "
+                "Run compare_with_taxonomy first."
+            ),
+        }
+
+    themes       = _load_json(themes_path)
+    taxonomy_map = _load_json(taxonomy_path)
+    taxonomy_str = "\n".join(f"  - {cat}" for cat in PAJAIS_TAXONOMY)
+
+    chain_groq = _TAXONOMY_PROMPT | _llm_groq() | JsonOutputParser()
+
+    def _map_theme_with_groq(theme: dict) -> dict:
+        return _invoke_with_retries(lambda: chain_groq.invoke({
+            "taxonomy":   taxonomy_str,
+            "theme_name": theme["theme_name"],
+            "evidence":   " | ".join(theme.get("evidence", [])[:3]),
+        }))
+
+    groq_maps = list(map(_map_theme_with_groq, themes))
+    groq_by_theme = {
+        str(item.get("theme_name", "")).strip(): item
+        for item in groq_maps
+    }
+
+    def _merge_mappings(mistral_row: dict) -> dict:
+        theme_name = str(mistral_row.get("theme_name", "")).strip()
+        groq_row = groq_by_theme.get(theme_name, {})
+        groq_match = str(groq_row.get("pajais_match", "")).strip()
+        mistral_match = str(mistral_row.get("pajais_match", "")).strip()
+        is_same = bool(groq_match) and (groq_match.lower() == mistral_match.lower())
+
+        return {
+            **mistral_row,
+            "mistral_pajais_match": mistral_match,
+            "mistral_confidence": _to_float(
+                mistral_row.get("mistral_confidence", mistral_row.get("confidence", 0.0)),
+                0.0,
+            ),
+            "mistral_reasoning": str(
+                mistral_row.get("mistral_reasoning", mistral_row.get("reasoning", ""))
+            ),
+            "mistral_is_novel": bool(
+                mistral_row.get("mistral_is_novel", mistral_row.get("is_novel", False))
+            ),
+            "groq_pajais_match": groq_match,
+            "groq_confidence": _to_float(groq_row.get("confidence"), 0.0),
+            "groq_reasoning": str(groq_row.get("reasoning", "")),
+            "groq_is_novel": bool(groq_row.get("is_novel", False)),
+            "taxonomy_verification_done": bool(groq_row),
+            "taxonomy_verification_note": (
+                "Mistral and Groq taxonomy mapping match."
+                if is_same
+                else "Mistral and Groq taxonomy mapping differ."
+            ) if groq_row else "Groq taxonomy mapping unavailable for this theme.",
+        }
+
+    merged_rows = list(map(_merge_mappings, taxonomy_map))
+    verification_path = rdir / "taxonomy_verification.json"
+    _save_json(taxonomy_path, merged_rows)
+    _save_json(verification_path, merged_rows)
+
+    preview = list(map(
+        lambda row: {
+            "theme_name": row.get("theme_name", ""),
+            "mistral_pajais_match": row.get("mistral_pajais_match", row.get("pajais_match", "")),
+            "groq_pajais_match": row.get("groq_pajais_match", ""),
+            "taxonomy_verification_note": row.get("taxonomy_verification_note", ""),
+        },
+        merged_rows[:MAX_TOOL_RETURN_PREVIEW],
+    ))
+
+    verified_count = sum(1 for row in merged_rows if row.get("groq_pajais_match"))
+
+    return {
+        "run_key": run_key,
+        "taxonomy_path": str(taxonomy_path),
+        "verification_path": str(verification_path),
+        "verified_count": int(verified_count),
+        "mapped_count": int(len(merged_rows)),
+        "mapping_preview": preview,
+    }
+
+
 # ============================================================================
 # TOOL 6 — generate_comparison_csv
 # ============================================================================
@@ -1199,6 +1333,7 @@ ALL_TOOLS = [
     verify_topic_labels_with_groq,
     consolidate_into_themes,
     compare_with_taxonomy,
+    verify_taxonomy_mapping_with_groq,
     generate_comparison_csv,
     export_narrative,
 ]
