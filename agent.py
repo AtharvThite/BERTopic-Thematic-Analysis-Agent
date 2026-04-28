@@ -197,7 +197,7 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
 
  Tool 4: verify_topic_labels_with_groq(run_key)
      Run only when researcher types VERIFY at STOP GATE 1.
-     Return Mistral vs Groq comparison in chat for manual verification.
+     Return Mistral vs Groq-Ollama vs Groq-GPT comparison in chat for manual verification.
 
  Tool 5: consolidate_into_themes(run_key, theme_map)
          Merge researcher-approved topic groups → recompute centroids → new evidence.
@@ -323,7 +323,7 @@ After researcher confirms:
     → Writes review table with Mistral labels by default
     OPTIONAL: if researcher types `VERIFY` at STOP GATE 1,
     call verify_topic_labels_with_groq(run_key) and present side-by-side
-    Mistral vs Groq label comparison directly in chat.
+    Mistral vs Groq-Ollama vs Groq-GPT label comparison directly in chat.
    NOTE: NO PACIS categories in Phase 2. PACIS comparison comes in Phase 5.5.
 
 3. Present CODED data with EVIDENCE under each topic:
@@ -345,7 +345,7 @@ After researcher confirms:
    📊 4 Plotly visualizations saved (download below)
 
    **Review these codes. Ready for Phase 3 (theme search)?**
-    • `VERIFY` — run Groq labels and compare with Mistral in chat output
+    • `VERIFY` — run Groq-Ollama + Groq-GPT labels and compare with Mistral in chat output
    • `approve` — codes look good, move to theme grouping
     • `re-run min_cluster_size=4` — more topics (smaller groups)
     • `re-run max_cluster_size=100` — cap oversized clusters
@@ -1031,14 +1031,15 @@ def _build_verify_chat_report(rows: list[dict]) -> str:
 
     shown = rows[:VERIFY_CHAT_MAX_ROWS]
     header = [
-        "| # | Mistral Label | Groq Label |",
-        "|---|---|---|",
+        "| # | Mistral Label | Groq-Ollama Label | Groq-GPT Label |",
+        "|---|---|---|---|",
     ]
     lines = list(map(
         lambda r: (
             f"| {int(r.get('cluster_id', 0))} "
             f"| {_sanitize_markdown_cell(r.get('mistral_label') or r.get('label', ''))} "
-            f"| {_sanitize_markdown_cell(r.get('groq_label', ''))} |"
+            f"| {_sanitize_markdown_cell(r.get('groq_ollama_label') or r.get('groq_label', ''))} "
+            f"| {_sanitize_markdown_cell(r.get('groq_gpt_label', ''))} |"
         ),
         shown,
     ))
@@ -1119,9 +1120,9 @@ def _handle_verify_command(state: dict) -> tuple[str, dict]:
         report = _build_verify_chat_report(labels_rows)
 
         reply = (
-            "VERIFY complete. Groq topic labeling has been added for Phase 2 topics.\n\n"
+            "VERIFY complete. Groq-Ollama and Groq-GPT topic labeling has been added for Phase 2 topics.\n\n"
             f"Verified topics: {verified_count}/{labelled_count}\n"
-            "Mistral vs Groq comparison is shown below in chat.\n\n"
+            "Mistral vs Groq-Ollama vs Groq-GPT comparison is shown below in chat.\n\n"
             f"{report}\n\n"
             "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
             "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"

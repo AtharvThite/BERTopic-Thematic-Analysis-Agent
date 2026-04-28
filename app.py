@@ -789,7 +789,8 @@ def build_app() -> gr.Blocks:
                 "<div class='api-warning'>"
                 "WARNING: GROQ_API_KEY is not set. "
                 "VERIFY command will be unavailable for Groq side-by-side checks. "
-                "Set it to enable Mistral + Groq verification in Phase 2 and Phase 5.5."
+                "Set it to enable Mistral + Groq-Ollama + Groq-GPT verification in Phase 2 "
+                "and Groq verification in Phase 5.5."
                 "</div>"
             )
 
@@ -875,7 +876,7 @@ def build_app() -> gr.Blocks:
                         <p style='font-size:0.78rem;color:var(--text-muted);margin:0 0 12px;'>
                             Edit <b>Approve</b>, <b>Rename To</b>, and <b>Reasoning</b> columns inline,
                             then click <b>Submit Review</b>. Use <b>verify</b> in chat at Phase 2
-                            or Phase 5.5 to see Mistral vs Groq comparison directly in chat output.
+                            or Phase 5.5 to see Mistral vs Groq comparisons directly in chat output.
                         </p>""")
 
                         review_table = gr.Dataframe(

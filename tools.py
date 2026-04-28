@@ -70,6 +70,8 @@ MISTRAL_API_KEY: str   = os.environ.get("MISTRAL_API_KEY", "")
 MODEL_NAME:      str   = "mistral-small-latest"
 GROQ_API_KEY: str      = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL_NAME: str   = os.environ.get("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_OLLAMA_MODEL_NAME: str = os.environ.get("GROQ_OLLAMA_MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_GPT_MODEL_NAME: str    = os.environ.get("GROQ_GPT_MODEL_NAME", "openai/gpt-oss-120b")
 EMBED_MODEL:     str   = "allenai/specter2_base"
 BASE_DIR:        Path  = Path(__file__).resolve().parent
 OUTPUT_DIR:      Path  = BASE_DIR / "outputs"
@@ -257,14 +259,14 @@ def _llm() -> ChatMistralAI:
     )
 
 
-def _llm_groq():
+def _llm_groq(model_name: str):
     if ChatGroq is None:
         raise RuntimeError(
             "langchain-groq is not installed. Install dependencies from requirements.txt "
             "to enable Groq topic-label verification."
         )
     return ChatGroq(
-        model=GROQ_MODEL_NAME,
+        model=model_name,
         api_key=GROQ_API_KEY,
         temperature=0.2,
         timeout=LLM_TIMEOUT_S,
@@ -272,8 +274,12 @@ def _llm_groq():
     )
 
 
-def _groq_enabled() -> bool:
-    return bool(GROQ_API_KEY) and ChatGroq is not None
+def _groq_ollama_enabled() -> bool:
+    return bool(GROQ_API_KEY) and ChatGroq is not None and bool(GROQ_OLLAMA_MODEL_NAME)
+
+
+def _groq_gpt_enabled() -> bool:
+    return bool(GROQ_API_KEY) and ChatGroq is not None and bool(GROQ_GPT_MODEL_NAME)
 
 
 def _to_float(value: object, fallback: float = 0.0) -> float:
@@ -736,8 +742,22 @@ def label_topics_with_llm(run_key: str) -> dict:
             "groq_confidence":    0.0,
             "groq_reasoning":     "",
             "groq_niche":         False,
+            "groq_ollama_label":  "",
+            "groq_ollama_category": "",
+            "groq_ollama_confidence": 0.0,
+            "groq_ollama_reasoning": "",
+            "groq_ollama_niche":  False,
+            "groq_gpt_label":     "",
+            "groq_gpt_category":  "",
+            "groq_gpt_confidence": 0.0,
+            "groq_gpt_reasoning": "",
+            "groq_gpt_niche":     False,
             "verification_done":  False,
-            "verification_note":  "Run VERIFY in Phase 2 to compare with Groq labels.",
+            "verification_done_ollama": False,
+            "verification_done_gpt": False,
+            "verification_note":  (
+                "Run VERIFY in Phase 2 to compare with Groq-Ollama and Groq-GPT labels."
+            ),
         }
 
     labelled = list(map(_label_one, selected))
@@ -752,6 +772,8 @@ def label_topics_with_llm(run_key: str) -> dict:
             "confidence":    r.get("confidence"),
             "mistral_label": r.get("mistral_label", ""),
             "groq_label":    r.get("groq_label", ""),
+            "groq_ollama_label": r.get("groq_ollama_label", r.get("groq_label", "")),
+            "groq_gpt_label": r.get("groq_gpt_label", ""),
             "size":          r.get("size"),
             "niche":         r.get("niche", False),
         },
@@ -765,8 +787,8 @@ def label_topics_with_llm(run_key: str) -> dict:
         "total_clusters":    len(summaries),
         "selected_clusters": len(selected),
         "skipped_clusters":  max(0, len(summaries) - len(selected)),
-        "groq_enabled":      _groq_enabled(),
-        "mode_note":         "Single-model labeling complete (Mistral). Send VERIFY in Phase 2 to run Groq verification.",
+        "groq_enabled":      _groq_ollama_enabled() and _groq_gpt_enabled(),
+        "mode_note":         "Single-model labeling complete (Mistral). Send VERIFY in Phase 2 to run Groq-Ollama and Groq-GPT verification.",
         "labels_preview":    preview,
     }
 
@@ -775,7 +797,7 @@ def label_topics_with_llm(run_key: str) -> dict:
 def verify_topic_labels_with_groq(run_key: str) -> dict:
     """
     Run Groq topic labeling for already-labeled topics and append comparison fields
-    into labels.json so UI review table can show both Mistral and Groq labels.
+    into labels.json so UI review table can show Mistral vs Groq-Ollama vs Groq-GPT labels.
 
     Parameters
     ----------
@@ -790,15 +812,16 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
     labels_path   = rdir / "labels.json"
     summaries_path = rdir / "summaries.json"
 
-    if not _groq_enabled():
+    if not _groq_ollama_enabled() or not _groq_gpt_enabled():
         return {
             "run_key": run_key,
             "labels_path": str(labels_path),
             "verified_count": 0,
             "labels_preview": [],
             "error": (
-                "GROQ_API_KEY is missing or langchain-groq is unavailable. "
-                "Set GROQ_API_KEY and install requirements to use VERIFY."
+                "GROQ_API_KEY or Groq model config is missing, or langchain-groq is unavailable. "
+                "Set GROQ_API_KEY and GROQ_GPT_MODEL_NAME (and optionally GROQ_OLLAMA_MODEL_NAME) "
+                "and install requirements to use VERIFY."
             ),
         }
 
@@ -838,7 +861,8 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
         labels_data,
     ))
 
-    chain_groq = _LABEL_PROMPT | _llm_groq() | JsonOutputParser()
+    chain_groq_ollama = _LABEL_PROMPT | _llm_groq(GROQ_OLLAMA_MODEL_NAME) | JsonOutputParser()
+    chain_groq_gpt = _LABEL_PROMPT | _llm_groq(GROQ_GPT_MODEL_NAME) | JsonOutputParser()
 
     def _evidence_block(summary: dict) -> str:
         return "\n".join(
@@ -846,29 +870,35 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
             for i, s in enumerate(summary.get("evidence", []))
         )
 
-    def _label_with_groq(row: dict) -> tuple[int, dict]:
+    def _label_with_groq(row: dict) -> tuple[int, dict, dict]:
         cid = int(row.get("cluster_id", -1))
         summary = summary_by_id[cid]
-        result = _invoke_with_retries(lambda: chain_groq.invoke({
+        payload = {
             "cluster_id": summary["cluster_id"],
             "size":       summary["size"],
             "evidence":   _evidence_block(summary),
-        }))
-        return cid, result
+        }
+        groq_ollama = _invoke_with_retries(lambda: chain_groq_ollama.invoke(payload))
+        groq_gpt = _invoke_with_retries(lambda: chain_groq_gpt.invoke(payload))
+        return cid, groq_ollama, groq_gpt
 
     groq_pairs = list(map(_label_with_groq, target_rows))
-    groq_by_id = {cid: data for cid, data in groq_pairs}
+    groq_ollama_by_id = {cid: data for cid, data, _ in groq_pairs}
+    groq_gpt_by_id = {cid: data for cid, _, data in groq_pairs}
 
     def _merge_row(row: dict) -> dict:
         cid = int(row.get("cluster_id", -1))
-        groq = groq_by_id.get(cid, {})
-        has_groq = bool(groq)
+        groq_ollama = groq_ollama_by_id.get(cid, {})
+        groq_gpt = groq_gpt_by_id.get(cid, {})
+        has_groq_ollama = bool(groq_ollama)
+        has_groq_gpt = bool(groq_gpt)
         mistral_label = str(row.get("mistral_label") or row.get("label", "")).strip()
-        groq_label = str(groq.get("label", "")).strip()
+        groq_ollama_label = str(groq_ollama.get("label", "")).strip()
+        groq_gpt_label = str(groq_gpt.get("label", "")).strip()
         is_agreement = (
-            mistral_label.lower() == groq_label.lower()
-            if has_groq and mistral_label and groq_label
-            else False
+            all([mistral_label, groq_ollama_label, groq_gpt_label])
+            and mistral_label.lower() == groq_ollama_label.lower()
+            and mistral_label.lower() == groq_gpt_label.lower()
         )
 
         return {
@@ -881,18 +911,30 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
             ),
             "mistral_reasoning":  row.get("mistral_reasoning") or row.get("reasoning", ""),
             "mistral_niche":      bool(row.get("mistral_niche", row.get("niche", False))),
-            "groq_label":         groq.get("label", ""),
-            "groq_category":      groq.get("category", ""),
-            "groq_confidence":    _to_float(groq.get("confidence"), 0.0),
-            "groq_reasoning":     groq.get("reasoning", ""),
-            "groq_niche":         bool(groq.get("niche", False)),
-            "verification_done":  has_groq,
+            "groq_label":         groq_ollama_label,
+            "groq_category":      groq_ollama.get("category", ""),
+            "groq_confidence":    _to_float(groq_ollama.get("confidence"), 0.0),
+            "groq_reasoning":     groq_ollama.get("reasoning", ""),
+            "groq_niche":         bool(groq_ollama.get("niche", False)),
+            "groq_ollama_label":  groq_ollama_label,
+            "groq_ollama_category": groq_ollama.get("category", ""),
+            "groq_ollama_confidence": _to_float(groq_ollama.get("confidence"), 0.0),
+            "groq_ollama_reasoning": groq_ollama.get("reasoning", ""),
+            "groq_ollama_niche":  bool(groq_ollama.get("niche", False)),
+            "groq_gpt_label":     groq_gpt_label,
+            "groq_gpt_category":  groq_gpt.get("category", ""),
+            "groq_gpt_confidence": _to_float(groq_gpt.get("confidence"), 0.0),
+            "groq_gpt_reasoning": groq_gpt.get("reasoning", ""),
+            "groq_gpt_niche":     bool(groq_gpt.get("niche", False)),
+            "verification_done":  has_groq_ollama and has_groq_gpt,
+            "verification_done_ollama": has_groq_ollama,
+            "verification_done_gpt": has_groq_gpt,
             "verification_note": (
-                "Mistral and Groq labels match."
+                "Mistral, Groq-Ollama, and Groq-GPT labels match."
                 if is_agreement
-                else "Mistral and Groq labels differ. Review before approval."
+                else "Model labels differ. Review before approval."
             )
-            if has_groq
+            if has_groq_ollama and has_groq_gpt
             else "Groq labeling unavailable for this topic.",
         }
 
@@ -905,13 +947,18 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
         lambda r: {
             "cluster_id":    r.get("cluster_id"),
             "mistral_label": r.get("mistral_label", ""),
-            "groq_label":    r.get("groq_label", ""),
+            "groq_ollama_label": r.get("groq_ollama_label", r.get("groq_label", "")),
+            "groq_gpt_label": r.get("groq_gpt_label", ""),
             "verification_note": r.get("verification_note", ""),
         },
         verified_rows[:MAX_TOOL_RETURN_PREVIEW],
     ))
 
-    verified_count = sum(1 for row in verified_rows if row.get("groq_label"))
+    verified_count = sum(
+        1
+        for row in verified_rows
+        if row.get("groq_ollama_label") and row.get("groq_gpt_label")
+    )
 
     return {
         "run_key":           run_key,
@@ -1117,7 +1164,7 @@ def verify_taxonomy_mapping_with_groq(run_key: str) -> dict:
         run_key, taxonomy_path, verification_path,
         verified_count, mapping_preview
     """
-    if not _groq_enabled():
+    if not _groq_ollama_enabled():
         return {
             "run_key": run_key,
             "taxonomy_path": str(_run_dir(run_key) / "taxonomy_map.json"),
@@ -1161,7 +1208,7 @@ def verify_taxonomy_mapping_with_groq(run_key: str) -> dict:
     taxonomy_map = _load_json(taxonomy_path)
     taxonomy_str = "\n".join(f"  - {cat}" for cat in PAJAIS_TAXONOMY)
 
-    chain_groq = _TAXONOMY_PROMPT | _llm_groq() | JsonOutputParser()
+    chain_groq = _TAXONOMY_PROMPT | _llm_groq(GROQ_OLLAMA_MODEL_NAME) | JsonOutputParser()
 
     def _map_theme_with_groq(theme: dict) -> dict:
         return _invoke_with_retries(lambda: chain_groq.invoke({
