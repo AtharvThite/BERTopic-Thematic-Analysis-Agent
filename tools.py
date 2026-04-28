@@ -46,10 +46,11 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.figure_factory as ff
-from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 from sentence_transformers import SentenceTransformer
+import hdbscan
+import umap
 
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
@@ -69,7 +70,7 @@ MISTRAL_API_KEY: str   = os.environ.get("MISTRAL_API_KEY", "")
 MODEL_NAME:      str   = "mistral-small-latest"
 GROQ_API_KEY: str      = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL_NAME: str   = os.environ.get("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
-EMBED_MODEL:     str   = "all-MiniLM-L6-v2"
+EMBED_MODEL:     str   = "allenai/specter2_base"
 BASE_DIR:        Path  = Path(__file__).resolve().parent
 OUTPUT_DIR:      Path  = BASE_DIR / "outputs"
 N_EVIDENCE:      int   = 5       # sentences kept per cluster centroid
@@ -78,10 +79,17 @@ RANDOM_SEED:     int   = 42
 LLM_TIMEOUT_S:   int   = 45
 LLM_MAX_RETRIES: int   = 3
 MAX_LABEL_CLUSTERS: int = 60
-MIN_CLUSTER_SIZE_FOR_LABEL: int = 3
+MIN_CLUSTER_SIZE_FOR_LABEL: int = 20
 MAX_TOOL_RETURN_PREVIEW: int = 12
 PROVIDER_RETRY_ATTEMPTS: int = 3
 PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
+HDBSCAN_MIN_CLUSTER_SIZE: int = 20
+HDBSCAN_MIN_SAMPLES: int = 5
+HDBSCAN_MAX_CLUSTER_SIZE: int = 120
+UMAP_N_NEIGHBORS: int = 15
+UMAP_MIN_DIST: float = 0.0
+UMAP_N_COMPONENTS_CLUSTER: int = 5
+UMAP_N_COMPONENTS_VIZ: int = 2
 
 # Run configurations — keys map to source columns
 RUN_CONFIGS: dict[str, list[str]] = {
@@ -198,18 +206,33 @@ def _texts_for_candidates(df: pd.DataFrame, candidates: list[str]) -> tuple[list
 
 
 def _embed(sentences: list[str]) -> np.ndarray:
-    """Encode sentences to L2-normalised 384-d vectors."""
-    model = SentenceTransformer(EMBED_MODEL)
+    """Encode sentences to L2-normalised SPECTER2 vectors."""
+    model = SentenceTransformer(EMBED_MODEL, trust_remote_code=True)
     raw   = model.encode(sentences, show_progress_bar=False, batch_size=64)
     return normalize(raw, norm="l2")   # unit-norm -> cosine = dot product
 
 
-def _cluster(embeddings: np.ndarray, threshold: float) -> np.ndarray:
-    return AgglomerativeClustering(
+def _umap_reduce(embeddings: np.ndarray, n_components: int) -> np.ndarray:
+    reducer = umap.UMAP(
+        n_neighbors=UMAP_N_NEIGHBORS,
+        min_dist=UMAP_MIN_DIST,
+        n_components=n_components,
         metric="cosine",
-        linkage="average",
-        distance_threshold=threshold,
-        n_clusters=None,
+        random_state=RANDOM_SEED,
+    )
+    return reducer.fit_transform(embeddings)
+
+
+def _cluster(embeddings: np.ndarray,
+             min_cluster_size: int,
+             max_cluster_size: int,
+             min_samples: int) -> np.ndarray:
+    return hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="euclidean",
+        cluster_selection_method="eom",
+        max_cluster_size=max_cluster_size,
     ).fit_predict(embeddings)
 
 
@@ -345,7 +368,11 @@ def _chart_top_words(summaries: list[dict]) -> go.Figure:
 
 
 def _chart_hierarchy(labels: list[int], embeddings: np.ndarray) -> go.Figure:
-    unique     = sorted(set(labels))
+    unique     = sorted(filter(lambda v: v != -1, set(labels)))
+    if not unique:
+        fig = go.Figure()
+        fig.update_layout(title="Cluster Hierarchy", template="plotly_dark")
+        return fig
     labels_arr = np.array(labels)
     centroids  = np.vstack([
         _centroid(embeddings[labels_arr == lbl])
@@ -362,7 +389,11 @@ def _chart_hierarchy(labels: list[int], embeddings: np.ndarray) -> go.Figure:
 
 
 def _chart_heatmap(labels: list[int], embeddings: np.ndarray) -> go.Figure:
-    unique     = sorted(set(labels))
+    unique     = sorted(filter(lambda v: v != -1, set(labels)))
+    if not unique:
+        fig = go.Figure()
+        fig.update_layout(title="Cluster Similarity Heatmap", template="plotly_dark")
+        return fig
     labels_arr = np.array(labels)
     centroids  = np.vstack([
         _centroid(embeddings[labels_arr == lbl])
@@ -460,21 +491,30 @@ def load_scopus_csv(filepath: str) -> dict:
 # ============================================================================
 
 @tool
-def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> dict:
+def run_bertopic_discovery(
+    run_key: str,
+    threshold: float = DISTANCE_THRESH,
+    min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE,
+    max_cluster_size: int = HDBSCAN_MAX_CLUSTER_SIZE,
+    min_samples: int = HDBSCAN_MIN_SAMPLES,
+) -> dict:
     """
-    Embed sentences, cluster with AgglomerativeClustering, extract evidence,
+    Embed sentences, cluster with UMAP + HDBSCAN, extract evidence,
     and generate four Plotly charts.
 
     Saved artefacts
     ---------------
-    emb.npy         : (N, 384) float32  L2-normalised embeddings
+    emb.npy         : (N, D)   float32  L2-normalised embeddings
     sent_labels.npy : (N,)     int32    per-sentence cluster label  [BUG 1 FIX]
     summaries.json  : list of cluster dicts with evidence sentences
 
     Parameters
     ----------
     run_key   : str   — "abstract" or "title" or "keywords"
-    threshold : float — cosine distance threshold for AgglomerativeClustering
+    threshold : float — legacy arg (ignored by HDBSCAN)
+    min_cluster_size : int — HDBSCAN minimum cluster size
+    max_cluster_size : int — HDBSCAN maximum cluster size
+    min_samples : int — HDBSCAN min_samples
 
     Returns
     -------
@@ -527,8 +567,16 @@ def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> 
     embeddings = _embed(sentences)
     np.save(str(rdir / "emb.npy"), embeddings)
 
-    labels     = _cluster(embeddings, threshold).tolist()
-    unique_ids = sorted(set(labels))
+    cluster_space = _umap_reduce(embeddings, UMAP_N_COMPONENTS_CLUSTER)
+    umap_2d = _umap_reduce(embeddings, UMAP_N_COMPONENTS_VIZ)
+
+    labels     = _cluster(
+        cluster_space,
+        min_cluster_size=min_cluster_size,
+        max_cluster_size=max_cluster_size,
+        min_samples=min_samples,
+    ).tolist()
+    unique_ids = sorted(filter(lambda v: v != -1, set(labels)))
 
     # FIX BUG 1 — persist per-sentence label array so Tool 4 can build
     # correct cluster masks without any guesswork or scaffolding.
@@ -536,17 +584,39 @@ def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> 
 
     labels_arr = np.array(labels)
 
+    if not unique_ids:
+        _save_json(rdir / "summaries.json", [])
+        return {
+            "run_key":         run_key,
+            "n_clusters":      0,
+            "n_sentences":     int(len(sentences)),
+            "threshold":       threshold,
+            "min_cluster_size": int(min_cluster_size),
+            "max_cluster_size": int(max_cluster_size),
+            "min_samples":     int(min_samples),
+            "chart_paths":     {},
+            "summaries_path":  str(rdir / "summaries.json"),
+            "embeddings_path": str(rdir / "emb.npy"),
+            "error": "HDBSCAN produced no clusters (all points labeled as noise).",
+        }
+
     def _cluster_summary(cid: int) -> dict:
         mask    = labels_arr == cid
         c_emb   = embeddings[mask]
+        c_umap  = umap_2d[mask]
         c_sent  = list(np.array(sentences)[mask])
         ctroid  = _centroid(c_emb)
         top_idx = _top_k_indices(c_emb, ctroid, N_EVIDENCE)
+        coords  = (
+            c_umap.mean(axis=0)
+            if c_umap.shape[0] > 0
+            else np.zeros(UMAP_N_COMPONENTS_VIZ, dtype=np.float32)
+        )
         return {
             "cluster_id": int(cid),
             "size":       int(mask.sum()),
-            "cx":         float(ctroid[0]),
-            "cy":         float(ctroid[1]),
+            "cx":         float(coords[0]),
+            "cy":         float(coords[1]),
             "evidence":   list(np.array(c_sent)[top_idx]),
         }
 
@@ -565,6 +635,9 @@ def run_bertopic_discovery(run_key: str, threshold: float = DISTANCE_THRESH) -> 
         "n_clusters":      int(len(unique_ids)),
         "n_sentences":     int(len(sentences)),
         "threshold":       threshold,
+        "min_cluster_size": int(min_cluster_size),
+        "max_cluster_size": int(max_cluster_size),
+        "min_samples":     int(min_samples),
         "chart_paths":     chart_paths,
         "summaries_path":  str(rdir / "summaries.json"),
         "embeddings_path": str(rdir / "emb.npy"),

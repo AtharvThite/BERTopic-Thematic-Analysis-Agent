@@ -4,8 +4,8 @@ Production Gradio dashboard for phase-gated thematic analysis of Scopus exports.
 
 The system combines:
 
-- Sentence-BERT embeddings (`all-MiniLM-L6-v2`)
-- Agglomerative clustering for topic discovery
+- SPECTER2 embeddings (`allenai/specter2`)
+- UMAP + HDBSCAN clustering for topic discovery
 - LangGraph ReAct orchestration
 - Mistral topic labeling and PAJAIS mapping by default
 - Optional `VERIFY` command for Groq side-by-side validation at Phase 2 and Phase 5.5
@@ -106,7 +106,7 @@ The agent is robust to natural-language variants, but short explicit prompts are
 ## Tools Implemented in `tools.py`
 
 1. `load_scopus_csv(filepath)`
-2. `run_bertopic_discovery(run_key, threshold)`
+2. `run_bertopic_discovery(run_key, min_cluster_size, max_cluster_size)`
 3. `label_topics_with_llm(run_key)`
 4. `verify_topic_labels_with_groq(run_key)`
 5. `consolidate_into_themes(run_key, theme_map)`
@@ -212,4 +212,4 @@ Methodological framing and implementation are inspired by:
 
 - Braun and Clarke (2006) reflexive thematic analysis
 - Grootendorst (2022) BERTopic
-- Sentence-BERT literature for semantic embeddings
+- SPECTER2 literature for semantic embeddings

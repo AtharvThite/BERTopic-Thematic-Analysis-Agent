@@ -12,3 +12,4 @@ pandas
 hdbscan
 umap-learn
 pynndescent
+peft

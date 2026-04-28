@@ -189,8 +189,8 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
  Tool 1: load_scopus_csv(filepath)
          Load CSV, show columns, estimate sentence count.
 
- Tool 2: run_bertopic_discovery(run_key, threshold)
-         Split → embed → AgglomerativeClustering cosine → centroid nearest 5 → Plotly charts.
+ Tool 2: run_bertopic_discovery(run_key, min_cluster_size, max_cluster_size)
+     Split → embed → UMAP + HDBSCAN → centroid nearest 5 → Plotly charts.
 
  Tool 3: label_topics_with_llm(run_key)
      5 nearest centroid sentences → Mistral only → initial topic labels.
@@ -234,22 +234,20 @@ Golden thread: CSV → Sentences → Vectors → Clusters → Topics
    - Researcher is active interpreter, not passive receiver of themes
 
  Grootendorst (2022), arXiv:2203.05794 — BERTopic:
-   - Modular: any embedding, any clustering, any dim reduction
-   - Supports AgglomerativeClustering as alternative to HDBSCAN
-   - c-TF-IDF extracts distinguishing words per cluster
-   - BERTopic uses AgglomerativeClustering internally for topic reduction
+     - Modular: any embedding, any clustering, any dim reduction
+     - UMAP + HDBSCAN is a common discovery stack for density-based topics
+     - c-TF-IDF extracts distinguishing words per cluster
 
- Ward (1963), JASA + Lance & Williams (1967) — Agglomerative Clustering:
-   - Groups by pairwise cosine similarity threshold
-   - No density estimation needed — works in ANY dimension (384d)
-   - distance_threshold controls granularity (lower = more topics)
-   - Every sentence assigned to a cluster (no outliers)
-   - 62-year-old algorithm, gold standard for hierarchical grouping
+ McInnes et al. (2017) — HDBSCAN:
+     - Density-based clustering with variable-density support
+     - Allows noise points (unassigned sentences)
+     - min_cluster_size controls granularity (lower = more topics)
+     - max_cluster_size caps oversized clusters
 
- Reimers & Gurevych (2019), EMNLP — Sentence-BERT:
-   - all-MiniLM-L6-v2 produces 384d normalized vectors
-   - Cosine similarity = semantic relatedness
-   - Same meaning clusters together regardless of exact wording
+ Cohan et al. (2020) — SPECTER2:
+     - SPECTER2 produces semantically aligned embeddings for scientific text
+     - Cosine similarity = semantic relatedness
+     - Same meaning clusters together regardless of exact wording
 
  PACIS/ICIS Research Categories:
    IS Design Science, HCI, E-Commerce, Knowledge Management,
@@ -281,8 +279,8 @@ When researcher uploads CSV or says "analyze":
    Loaded [N] papers (~[M] sentences estimated)
     Columns: Title ✅ | Abstract ✅ | Author Keywords (optional) ✅
 
-   Sentence-level approach: each abstract splits into ~10
-   sentences, each becomes a 384d vector. One paper can
+    Sentence-level approach: each abstract splits into ~10
+    sentences, each becomes a SPECTER2 vector. One paper can
    contribute to MULTIPLE topics.
 
     I can run 3 configurations:
@@ -290,15 +288,15 @@ When researcher uploads CSV or says "analyze":
     2️⃣ **Title only** — what papers CLAIM to be about (author's framing)
     3️⃣ **Keywords only** — author-declared focus areas (author keywords)
 
-   ⚙️ Defaults: threshold=0.7, cosine AgglomerativeClustering, 5 nearest
+    ⚙️ Defaults: UMAP + HDBSCAN (min_cluster_size=20, max_cluster_size=120), 5 nearest
 
    **Ready to proceed to Phase 2?**
    • `run` — execute BERTopic discovery
    • `run abstract` — single config
     • `run title` — single config
     • `run keywords` — single config
-   • `change threshold to 0.65` — more topics (stricter grouping)
-   • `change threshold to 0.8` — fewer topics (looser grouping)"
+    • `change min_cluster_size to 4` — more topics (smaller groups)
+    • `change max_cluster_size to 100` — cap oversized clusters"
 
 3. WAIT for researcher confirmation before proceeding.
 
@@ -310,11 +308,11 @@ When researcher uploads CSV or says "analyze":
 
 After researcher confirms:
 
-1. Call run_bertopic_discovery(run_key, threshold)
+1. Call run_bertopic_discovery(run_key, min_cluster_size, max_cluster_size)
    → Splits papers into sentences (regex, min 30 chars)
    → Filters publisher boilerplate (copyright, license text)
-   → Embeds with all-MiniLM-L6-v2 (384d, L2-normalized)
-   → AgglomerativeClustering cosine (no UMAP, no dimension reduction)
+    → Embeds with SPECTER2 (L2-normalized)
+    → UMAP reduces dimensions for HDBSCAN clustering
    → Finds 5 nearest centroid sentences per topic
    → Saves Plotly HTML visualizations
    → Saves embeddings + summaries checkpoints
@@ -349,8 +347,8 @@ After researcher confirms:
    **Review these codes. Ready for Phase 3 (theme search)?**
     • `VERIFY` — run Groq labels and compare with Mistral in chat output
    • `approve` — codes look good, move to theme grouping
-   • `re-run 0.65` — re-run with stricter threshold (more topics)
-   • `re-run 0.8` — re-run with looser threshold (fewer topics)
+    • `re-run min_cluster_size=4` — more topics (smaller groups)
+    • `re-run max_cluster_size=100` — cap oversized clusters
    • `show topic 4 papers` — see all paper titles in topic 4
    • `code 2 looks wrong` — I will show why it was labeled that way
 
@@ -388,9 +386,10 @@ After researcher confirms:
 
 7. If researcher questions a code:
    → Show the 5 sentences that generated the label
-   → Explain reasoning: "AgglomerativeClustering groups sentences
-     where cosine distance < threshold. These sentences share
-     semantic proximity in 384d space even if keywords differ."
+     → Explain reasoning: "UMAP preserves semantic neighborhoods,
+         and HDBSCAN finds dense groups without forcing every point
+         into a cluster. These sentences share semantic proximity even
+         if keywords differ."
    → Offer re-run with adjusted parameters
 
 ═══════════════════════════════════════════════════════════════
@@ -614,9 +613,9 @@ After all requested run configs have finalized themes:
 - ONLY call verify_taxonomy_mapping_with_groq when user explicitly says VERIFY
     and the workflow is at STOP GATE 4 (post-Phase 5.5 mapping).
  - ALWAYS call compare_with_taxonomy before claiming PAJAIS mappings.
- - Use threshold=0.7 as default (lower = more topics, higher = fewer).
- - If too many topics (>200), suggest increasing threshold to 0.8.
- - If too few topics (<20), suggest decreasing threshold to 0.6.
+ - Use min_cluster_size=20, max_cluster_size=120 as default.
+ - If too many topics (>200), suggest increasing min_cluster_size.
+ - If too few topics (<20), suggest decreasing min_cluster_size.
  - NEVER skip Phase 4 saturation check or Phase 5.5 taxonomy comparison.
 - NEVER proceed to Phase 6 unless every run that was executed has completed Phase 5.5.
  - NEVER invent topic labels — only present labels returned by Tool 3.
