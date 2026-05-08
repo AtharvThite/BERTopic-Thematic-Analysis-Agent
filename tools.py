@@ -92,6 +92,17 @@ UMAP_N_NEIGHBORS: int = 15
 UMAP_MIN_DIST: float = 0.0
 UMAP_N_COMPONENTS_CLUSTER: int = 5
 UMAP_N_COMPONENTS_VIZ: int = 2
+AUTO_OPTIMIZE_CLUSTERS: bool = True
+OPTIMIZE_MAX_ITERS: int = 3
+OPTIMIZE_TARGET_CLUSTER_MIN: int = 20
+OPTIMIZE_TARGET_CLUSTER_MAX: int = 120
+OPTIMIZE_TARGET_NOISE_MAX: float = 0.50
+OPTIMIZE_MIN_CLUSTER_SIZE_MIN: int = 5
+OPTIMIZE_MIN_CLUSTER_SIZE_MAX: int = 60
+OPTIMIZE_MAX_CLUSTER_SIZE_MIN: int = 40
+OPTIMIZE_MAX_CLUSTER_SIZE_MAX: int = 200
+OPTIMIZE_MIN_SAMPLES_MIN: int = 1
+OPTIMIZE_MIN_SAMPLES_MAX: int = 15
 
 # Run configurations — keys map to source columns
 RUN_CONFIGS: dict[str, list[str]] = {
@@ -289,6 +300,187 @@ def _to_float(value: object, fallback: float = 0.0) -> float:
         return float(fallback)
 
 
+def _clamp_int(value: object, low: int, high: int, fallback: int) -> int:
+    try:
+        casted = int(value)
+    except (TypeError, ValueError):
+        casted = int(fallback)
+    return max(low, min(high, casted))
+
+
+def _cluster_metrics(labels: np.ndarray) -> dict:
+    labels_arr = np.array(labels, dtype=np.int32)
+    n_sentences = int(labels_arr.shape[0])
+    noise_count = int((labels_arr == -1).sum())
+    unique_ids = sorted(filter(lambda v: v != -1, set(labels_arr.tolist())))
+    sizes = list(map(lambda cid: int((labels_arr == cid).sum()), unique_ids))
+
+    if sizes:
+        min_size = float(np.min(sizes))
+        median_size = float(np.median(sizes))
+        mean_size = float(np.mean(sizes))
+        max_size = float(np.max(sizes))
+    else:
+        min_size = 0.0
+        median_size = 0.0
+        mean_size = 0.0
+        max_size = 0.0
+
+    return {
+        "n_sentences": n_sentences,
+        "n_clusters": int(len(unique_ids)),
+        "noise_ratio": float(noise_count) / float(max(1, n_sentences)),
+        "min_size": min_size,
+        "median_size": median_size,
+        "mean_size": mean_size,
+        "max_size": max_size,
+    }
+
+
+def _heuristic_hdbscan_tweak(metrics: dict, params: dict) -> dict:
+    n_clusters = int(metrics.get("n_clusters", 0))
+    noise_ratio = float(metrics.get("noise_ratio", 0.0))
+
+    min_cluster_size = int(params.get("min_cluster_size", HDBSCAN_MIN_CLUSTER_SIZE))
+    max_cluster_size = int(params.get("max_cluster_size", HDBSCAN_MAX_CLUSTER_SIZE))
+    min_samples = int(params.get("min_samples", HDBSCAN_MIN_SAMPLES))
+
+    action = "accept"
+    reasoning = "Cluster metrics are within target ranges."
+
+    if n_clusters < OPTIMIZE_TARGET_CLUSTER_MIN:
+        min_cluster_size = max(
+            OPTIMIZE_MIN_CLUSTER_SIZE_MIN,
+            int(round(min_cluster_size * 0.8)),
+        )
+        min_samples = max(OPTIMIZE_MIN_SAMPLES_MIN, min_samples - 1)
+        action = "tweak"
+        reasoning = "Too few clusters; reducing min_cluster_size and min_samples."
+    elif n_clusters > OPTIMIZE_TARGET_CLUSTER_MAX:
+        min_cluster_size = min(
+            OPTIMIZE_MIN_CLUSTER_SIZE_MAX,
+            int(round(min_cluster_size * 1.2)),
+        )
+        min_samples = min(OPTIMIZE_MIN_SAMPLES_MAX, min_samples + 1)
+        action = "tweak"
+        reasoning = "Too many clusters; increasing min_cluster_size and min_samples."
+    elif noise_ratio > OPTIMIZE_TARGET_NOISE_MAX:
+        min_cluster_size = max(
+            OPTIMIZE_MIN_CLUSTER_SIZE_MIN,
+            int(round(min_cluster_size * 0.85)),
+        )
+        min_samples = max(OPTIMIZE_MIN_SAMPLES_MIN, min_samples - 1)
+        action = "tweak"
+        reasoning = "Noise ratio is high; lowering min_cluster_size and min_samples."
+
+    return {
+        "action": action,
+        "min_cluster_size": min_cluster_size,
+        "max_cluster_size": max_cluster_size,
+        "min_samples": min_samples,
+        "reasoning": reasoning,
+    }
+
+
+def _normalize_hdbscan_suggestion(suggestion: dict, current: dict) -> dict:
+    action = str(suggestion.get("action", "accept")).strip().lower()
+    action = action if action in {"accept", "tweak"} else "accept"
+
+    min_cluster_size = _clamp_int(
+        suggestion.get("min_cluster_size", current.get("min_cluster_size")),
+        OPTIMIZE_MIN_CLUSTER_SIZE_MIN,
+        OPTIMIZE_MIN_CLUSTER_SIZE_MAX,
+        current.get("min_cluster_size", HDBSCAN_MIN_CLUSTER_SIZE),
+    )
+    max_cluster_size = _clamp_int(
+        suggestion.get("max_cluster_size", current.get("max_cluster_size")),
+        OPTIMIZE_MAX_CLUSTER_SIZE_MIN,
+        OPTIMIZE_MAX_CLUSTER_SIZE_MAX,
+        current.get("max_cluster_size", HDBSCAN_MAX_CLUSTER_SIZE),
+    )
+    min_samples = _clamp_int(
+        suggestion.get("min_samples", current.get("min_samples")),
+        OPTIMIZE_MIN_SAMPLES_MIN,
+        OPTIMIZE_MIN_SAMPLES_MAX,
+        current.get("min_samples", HDBSCAN_MIN_SAMPLES),
+    )
+
+    if max_cluster_size < min_cluster_size:
+        max_cluster_size = min_cluster_size + 1
+
+    return {
+        "action": action,
+        "min_cluster_size": min_cluster_size,
+        "max_cluster_size": max_cluster_size,
+        "min_samples": min_samples,
+        "reasoning": str(suggestion.get("reasoning", "")).strip(),
+    }
+
+
+def _load_sentence_meta(run_key: str, sentences: list[str]) -> list[dict]:
+    meta_path = OUTPUT_DIR / run_key / "sentence_meta.json"
+    if not meta_path.exists():
+        return [
+            {
+                "sentence": s,
+                "paper_title": "",
+                "paper_id": None,
+            }
+            for s in sentences
+        ]
+
+    meta = _load_json(meta_path)
+    if not isinstance(meta, list):
+        return [
+            {
+                "sentence": s,
+                "paper_title": "",
+                "paper_id": None,
+            }
+            for s in sentences
+        ]
+
+    if len(meta) != len(sentences):
+        return [
+            {
+                "sentence": s,
+                "paper_title": "",
+                "paper_id": None,
+            }
+            for s in sentences
+        ]
+
+    return meta
+
+
+def _top_papers_for_mask(meta: list[dict], mask: np.ndarray, k: int = 3) -> dict:
+    counts: dict[tuple[object, str], int] = {}
+    for idx, entry in enumerate(meta):
+        if not mask[idx]:
+            continue
+        paper_id = entry.get("paper_id")
+        title = str(entry.get("paper_title") or entry.get("title") or "").strip()
+        if not title:
+            title = f"Paper {paper_id}" if paper_id is not None else "Unknown"
+        key = (paper_id, title)
+        counts[key] = counts.get(key, 0) + 1
+
+    ordered = sorted(
+        counts.items(),
+        key=lambda kv: (-kv[1], str(kv[0][1]).lower()),
+    )
+
+    top = [
+        {"paper_id": pid, "paper_title": title, "count": count}
+        for (pid, title), count in ordered[:k]
+    ]
+
+    return {
+        "paper_count": int(len(counts)),
+        "top_papers": top,
+    }
+
+
 def _is_transient_provider_error(exc: Exception) -> bool:
     """Detect transient provider outages (Mistral/Groq) that should be retried."""
     msg = str(exc).lower()
@@ -421,6 +613,78 @@ def _save_chart(fig: go.Figure, path: Path) -> str:
     return str(path)
 
 
+_OPTIMIZE_PROMPT = PromptTemplate.from_template(
+    """You are optimizing HDBSCAN clustering parameters for BERTopic.
+
+Current parameters:
+  min_cluster_size: {min_cluster_size}
+  max_cluster_size: {max_cluster_size}
+  min_samples: {min_samples}
+
+Clustering metrics:
+  n_sentences: {n_sentences}
+  n_clusters: {n_clusters}
+  noise_ratio: {noise_ratio}
+  min_size: {min_size}
+  median_size: {median_size}
+  mean_size: {mean_size}
+  max_size: {max_size}
+
+Constraints:
+- Only adjust min_cluster_size, max_cluster_size, min_samples.
+- Keep min_cluster_size within [{min_cluster_size_min}, {min_cluster_size_max}].
+- Keep max_cluster_size within [{max_cluster_size_min}, {max_cluster_size_max}].
+- Keep min_samples within [{min_samples_min}, {min_samples_max}].
+- Prefer n_clusters in [{target_cluster_min}, {target_cluster_max}].
+- Prefer noise_ratio <= {target_noise_max}.
+
+Return RAW JSON with exactly these keys:
+  action: "accept" or "tweak"
+  min_cluster_size: int
+  max_cluster_size: int
+  min_samples: int
+  reasoning: short sentence
+
+If clustering already looks good, set action="accept" and repeat the current values.
+Respond with RAW JSON only.
+"""
+)
+
+
+def _recommend_hdbscan_params(metrics: dict, params: dict) -> dict:
+    if not MISTRAL_API_KEY:
+        return _normalize_hdbscan_suggestion(
+            _heuristic_hdbscan_tweak(metrics, params),
+            params,
+        )
+
+    chain = _OPTIMIZE_PROMPT | _llm() | JsonOutputParser()
+
+    payload = {
+        **metrics,
+        **params,
+        "min_cluster_size_min": OPTIMIZE_MIN_CLUSTER_SIZE_MIN,
+        "min_cluster_size_max": OPTIMIZE_MIN_CLUSTER_SIZE_MAX,
+        "max_cluster_size_min": OPTIMIZE_MAX_CLUSTER_SIZE_MIN,
+        "max_cluster_size_max": OPTIMIZE_MAX_CLUSTER_SIZE_MAX,
+        "min_samples_min": OPTIMIZE_MIN_SAMPLES_MIN,
+        "min_samples_max": OPTIMIZE_MIN_SAMPLES_MAX,
+        "target_cluster_min": OPTIMIZE_TARGET_CLUSTER_MIN,
+        "target_cluster_max": OPTIMIZE_TARGET_CLUSTER_MAX,
+        "target_noise_max": OPTIMIZE_TARGET_NOISE_MAX,
+    }
+
+    try:
+        suggestion = _invoke_with_retries(lambda: chain.invoke(payload))
+    except Exception:
+        suggestion = {}
+
+    if not isinstance(suggestion, dict) or not suggestion:
+        suggestion = _heuristic_hdbscan_tweak(metrics, params)
+
+    return _normalize_hdbscan_suggestion(suggestion, params)
+
+
 # ============================================================================
 # TOOL 1 — load_scopus_csv
 # ============================================================================
@@ -448,31 +712,53 @@ def load_scopus_csv(filepath: str) -> dict:
     title_texts, title_col       = _texts_for_candidates(df, RUN_CONFIGS["title"])
     keywords_texts, keywords_col = _texts_for_candidates(df, RUN_CONFIGS["keywords"])
 
-    abstract_sentences = list(reduce(
-        lambda acc, sents: acc + sents,
-        map(_split_sentences, abstract_texts),
-        [],
-    ))
+    titles_for_meta = (
+        df[title_col].fillna("").astype(str).tolist()
+        if title_col
+        else [""] * len(df)
+    )
 
-    title_sentences = list(reduce(
-        lambda acc, sents: acc + sents,
-        map(_split_sentences, title_texts),
-        [],
-    ))
+    def _build_sentences_and_meta(text_col: str | None, splitter) -> tuple[list[str], list[dict]]:
+        if not text_col:
+            return [], []
+        texts = df[text_col].fillna("").astype(str).tolist()
+        sentences: list[str] = []
+        meta: list[dict] = []
+        for idx, (text, title) in enumerate(zip(texts, titles_for_meta), start=1):
+            parts = splitter(text)
+            if not parts:
+                continue
+            sentences.extend(parts)
+            meta.extend(
+                {
+                    "sentence": part,
+                    "paper_title": title or f"Paper {idx}",
+                    "paper_id": idx,
+                }
+                for part in parts
+            )
+        return sentences, meta
 
-    keywords_terms = list(reduce(
-        lambda acc, terms: acc + terms,
-        map(_split_keywords, keywords_texts),
-        [],
-    ))
+    abstract_sentences, abstract_meta = _build_sentences_and_meta(
+        abstract_col, _split_sentences
+    )
+    title_sentences, title_meta = _build_sentences_and_meta(
+        title_col, _split_sentences
+    )
+    keywords_terms, keywords_meta = _build_sentences_and_meta(
+        keywords_col, _split_keywords
+    )
 
     _ensure_dir(OUTPUT_DIR / "abstract")
     _ensure_dir(OUTPUT_DIR / "title")
     _ensure_dir(OUTPUT_DIR / "keywords")
 
     _save_json(OUTPUT_DIR / "abstract" / "sentences.json", abstract_sentences)
+    _save_json(OUTPUT_DIR / "abstract" / "sentence_meta.json", abstract_meta)
     _save_json(OUTPUT_DIR / "title"    / "sentences.json", title_sentences)
+    _save_json(OUTPUT_DIR / "title"    / "sentence_meta.json", title_meta)
     _save_json(OUTPUT_DIR / "keywords" / "sentences.json", keywords_terms)
+    _save_json(OUTPUT_DIR / "keywords" / "sentence_meta.json", keywords_meta)
 
     df.to_csv(OUTPUT_DIR / "corpus.csv", index=False)
 
@@ -503,6 +789,8 @@ def run_bertopic_discovery(
     min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE,
     max_cluster_size: int = HDBSCAN_MAX_CLUSTER_SIZE,
     min_samples: int = HDBSCAN_MIN_SAMPLES,
+    auto_optimize: bool = AUTO_OPTIMIZE_CLUSTERS,
+    max_optimize_iters: int = OPTIMIZE_MAX_ITERS,
 ) -> dict:
     """
     Embed sentences, cluster with UMAP + HDBSCAN, extract evidence,
@@ -513,6 +801,7 @@ def run_bertopic_discovery(
     emb.npy         : (N, D)   float32  L2-normalised embeddings
     sent_labels.npy : (N,)     int32    per-sentence cluster label  [BUG 1 FIX]
     summaries.json  : list of cluster dicts with evidence sentences
+    optimization.json : list of optimization rounds and metrics
 
     Parameters
     ----------
@@ -521,12 +810,14 @@ def run_bertopic_discovery(
     min_cluster_size : int — HDBSCAN minimum cluster size
     max_cluster_size : int — HDBSCAN maximum cluster size
     min_samples : int — HDBSCAN min_samples
+    auto_optimize : bool — run LLM-guided optimization loop
+    max_optimize_iters : int — max optimization rounds after initial run
 
     Returns
     -------
     dict with keys:
         run_key, n_clusters, n_sentences, threshold,
-        chart_paths, summaries_path, embeddings_path
+        chart_paths, summaries_path, embeddings_path, optimization_path
     """
     if run_key not in RUN_CONFIGS:
         return {
@@ -570,18 +861,84 @@ def run_bertopic_discovery(
             ),
         }
 
-    embeddings = _embed(sentences)
-    np.save(str(rdir / "emb.npy"), embeddings)
+    sentence_meta = _load_sentence_meta(run_key, sentences)
+
+    emb_path = rdir / "emb.npy"
+    embeddings = None
+    if emb_path.exists():
+        cached = np.load(str(emb_path))
+        if cached.shape[0] == len(sentences):
+            embeddings = cached
+
+    if embeddings is None:
+        embeddings = _embed(sentences)
+        np.save(str(emb_path), embeddings)
 
     cluster_space = _umap_reduce(embeddings, UMAP_N_COMPONENTS_CLUSTER)
     umap_2d = _umap_reduce(embeddings, UMAP_N_COMPONENTS_VIZ)
 
-    labels     = _cluster(
-        cluster_space,
-        min_cluster_size=min_cluster_size,
-        max_cluster_size=max_cluster_size,
-        min_samples=min_samples,
-    ).tolist()
+    def _run_hdbscan(params: dict) -> tuple[list[int], dict]:
+        labels_local = _cluster(
+            cluster_space,
+            min_cluster_size=int(params.get("min_cluster_size", HDBSCAN_MIN_CLUSTER_SIZE)),
+            max_cluster_size=int(params.get("max_cluster_size", HDBSCAN_MAX_CLUSTER_SIZE)),
+            min_samples=int(params.get("min_samples", HDBSCAN_MIN_SAMPLES)),
+        ).tolist()
+        return labels_local, _cluster_metrics(np.array(labels_local))
+
+    current_params = {
+        "min_cluster_size": int(min_cluster_size),
+        "max_cluster_size": int(max_cluster_size),
+        "min_samples": int(min_samples),
+    }
+
+    labels, metrics = _run_hdbscan(current_params)
+    optimization_log = [
+        {
+            "round": 0,
+            "params": current_params,
+            "metrics": metrics,
+        }
+    ]
+
+    seen_params = {(
+        current_params["min_cluster_size"],
+        current_params["max_cluster_size"],
+        current_params["min_samples"],
+    )}
+
+    if bool(auto_optimize) and int(max_optimize_iters) > 0:
+        for round_idx in range(1, int(max_optimize_iters) + 1):
+            suggestion = _recommend_hdbscan_params(metrics, current_params)
+            if suggestion.get("action") == "accept":
+                break
+
+            next_params = {
+                "min_cluster_size": int(suggestion.get("min_cluster_size")),
+                "max_cluster_size": int(suggestion.get("max_cluster_size")),
+                "min_samples": int(suggestion.get("min_samples")),
+            }
+            next_key = (
+                next_params["min_cluster_size"],
+                next_params["max_cluster_size"],
+                next_params["min_samples"],
+            )
+            if next_key in seen_params:
+                break
+
+            labels, metrics = _run_hdbscan(next_params)
+            optimization_log.append({
+                "round": round_idx,
+                "params": next_params,
+                "metrics": metrics,
+                "reasoning": suggestion.get("reasoning", ""),
+            })
+            current_params = next_params
+            seen_params.add(next_key)
+
+    optimization_path = rdir / "optimization.json"
+    _save_json(optimization_path, optimization_log)
+
     unique_ids = sorted(filter(lambda v: v != -1, set(labels)))
 
     # FIX BUG 1 — persist per-sentence label array so Tool 4 can build
@@ -593,16 +950,17 @@ def run_bertopic_discovery(
     if not unique_ids:
         _save_json(rdir / "summaries.json", [])
         return {
-            "run_key":         run_key,
-            "n_clusters":      0,
-            "n_sentences":     int(len(sentences)),
-            "threshold":       threshold,
-            "min_cluster_size": int(min_cluster_size),
-            "max_cluster_size": int(max_cluster_size),
-            "min_samples":     int(min_samples),
-            "chart_paths":     {},
-            "summaries_path":  str(rdir / "summaries.json"),
-            "embeddings_path": str(rdir / "emb.npy"),
+            "run_key":          run_key,
+            "n_clusters":       0,
+            "n_sentences":      int(len(sentences)),
+            "threshold":        threshold,
+            "min_cluster_size": int(current_params["min_cluster_size"]),
+            "max_cluster_size": int(current_params["max_cluster_size"]),
+            "min_samples":      int(current_params["min_samples"]),
+            "chart_paths":      {},
+            "summaries_path":   str(rdir / "summaries.json"),
+            "embeddings_path":  str(rdir / "emb.npy"),
+            "optimization_path": str(optimization_path),
             "error": "HDBSCAN produced no clusters (all points labeled as noise).",
         }
 
@@ -618,12 +976,15 @@ def run_bertopic_discovery(
             if c_umap.shape[0] > 0
             else np.zeros(UMAP_N_COMPONENTS_VIZ, dtype=np.float32)
         )
+        paper_stats = _top_papers_for_mask(sentence_meta, mask, k=3)
         return {
-            "cluster_id": int(cid),
-            "size":       int(mask.sum()),
-            "cx":         float(coords[0]),
-            "cy":         float(coords[1]),
-            "evidence":   list(np.array(c_sent)[top_idx]),
+            "cluster_id":  int(cid),
+            "size":        int(mask.sum()),
+            "cx":          float(coords[0]),
+            "cy":          float(coords[1]),
+            "evidence":    list(np.array(c_sent)[top_idx]),
+            "paper_count": paper_stats.get("paper_count", 0),
+            "top_papers":  paper_stats.get("top_papers", []),
         }
 
     summaries = list(map(_cluster_summary, unique_ids))
@@ -637,16 +998,17 @@ def run_bertopic_discovery(
     }
 
     return {
-        "run_key":         run_key,
-        "n_clusters":      int(len(unique_ids)),
-        "n_sentences":     int(len(sentences)),
-        "threshold":       threshold,
-        "min_cluster_size": int(min_cluster_size),
-        "max_cluster_size": int(max_cluster_size),
-        "min_samples":     int(min_samples),
-        "chart_paths":     chart_paths,
-        "summaries_path":  str(rdir / "summaries.json"),
-        "embeddings_path": str(rdir / "emb.npy"),
+        "run_key":          run_key,
+        "n_clusters":       int(len(unique_ids)),
+        "n_sentences":      int(len(sentences)),
+        "threshold":        threshold,
+        "min_cluster_size": int(current_params["min_cluster_size"]),
+        "max_cluster_size": int(current_params["max_cluster_size"]),
+        "min_samples":      int(current_params["min_samples"]),
+        "chart_paths":      chart_paths,
+        "summaries_path":   str(rdir / "summaries.json"),
+        "embeddings_path":  str(rdir / "emb.npy"),
+        "optimization_path": str(optimization_path),
     }
 
 

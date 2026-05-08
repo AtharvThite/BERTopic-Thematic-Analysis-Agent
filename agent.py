@@ -313,6 +313,7 @@ After researcher confirms:
    → Filters publisher boilerplate (copyright, license text)
     → Embeds with SPECTER2 (L2-normalized)
     → UMAP reduces dimensions for HDBSCAN clustering
+    → Auto-optimizes HDBSCAN parameters after the first run (optimization.json)
    → Finds 5 nearest centroid sentences per topic
    → Saves Plotly HTML visualizations
    → Saves embeddings + summaries checkpoints
@@ -360,7 +361,7 @@ After researcher confirms:
    | Research Area | General research area (NOT PACIS — that comes later in Phase 5.5) |
    | Confidence | How well the 5 sentences match the label |
    | Sentences | Number of sentences clustered here |
-   | Papers | Number of unique papers contributing sentences |
+    | Papers | Unique paper count plus top 3 paper titles |
    | Approve | Edit: yes/no — keep or reject this topic |
    | Rename To | Edit: type new name if label is wrong |
    | Your Reasoning | Edit: why you renamed/rejected |"
@@ -825,6 +826,7 @@ def _collect_output_files(state: dict) -> list[str]:
     rdir       = _run_dir(run_key)
     candidates = [
         str(rdir / "summaries.json"),
+        str(rdir / "optimization.json"),
         str(rdir / "labels.json"),
         str(rdir / "labels_verification.json"),
         str(rdir / "themes.json"),
@@ -940,6 +942,34 @@ def _populate_review_df(state: dict) -> dict:
                         or row.get("reasoning", "")
                 ).strip()
 
+    def _papers_cell(row: dict) -> str:
+        count = row.get("paper_count")
+        top_papers = row.get("top_papers", [])
+        if isinstance(top_papers, list) and top_papers:
+            titles = []
+            for entry in top_papers[:3]:
+                if isinstance(entry, dict):
+                    title = str(
+                        entry.get("paper_title")
+                        or entry.get("title")
+                        or ""
+                    ).strip()
+                    paper_count = entry.get("count")
+                    if title:
+                        titles.append(
+                            f"{title} ({paper_count})"
+                            if paper_count
+                            else title
+                        )
+                else:
+                    titles.append(str(entry))
+            title_str = "; ".join(filter(None, titles))
+            if count:
+                return f"{count} | {title_str}" if title_str else str(count)
+            return title_str
+
+        return str(count) if count else ""
+
     return (
         {
             **state,
@@ -949,7 +979,7 @@ def _populate_review_df(state: dict) -> dict:
                     "Topic Label": r.get("label") or r.get("mistral_label", ""),
                     "Top Evidence":r["evidence"][0] if r.get("evidence") else "",
                     "Sentences":   r.get("size", 0),
-                    "Papers":      "",
+                    "Papers":      _papers_cell(r),
                     "Approve":     False,
                     "Rename To":   r.get("label") or r.get("mistral_label", ""),
                     "Reasoning":   _reasoning_cell(r),
