@@ -680,6 +680,115 @@ def build_cluster_stats_html(agent_state: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Helper — cluster info HTML
+# ---------------------------------------------------------------------------
+def build_cluster_info_html(agent_state: dict) -> str:
+    run_key = agent_state.get("run_key", "abstract")
+    summaries_path = OUTPUTS_DIR / run_key / "summaries.json"
+    labels_path = OUTPUTS_DIR / run_key / "labels.json"
+
+    if not summaries_path.exists():
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0 2px;'>"
+            "No clusters yet. Run topic discovery to generate cluster summaries."
+            "</p>"
+        )
+
+    try:
+        summaries = json.loads(summaries_path.read_text(encoding="utf-8"))
+    except Exception:
+        summaries = []
+
+    labels = []
+    if labels_path.exists():
+        try:
+            labels = json.loads(labels_path.read_text(encoding="utf-8"))
+        except Exception:
+            labels = []
+
+    label_by_id = {
+        int(row.get("cluster_id", -1)): (
+            row.get("adjudicated_label")
+            or row.get("mistral_label")
+            or row.get("label")
+            or ""
+        )
+        for row in labels
+        if isinstance(row, dict)
+    }
+
+    def _escape_html(text: object) -> str:
+        return (
+            str(text or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _format_papers(papers: list[dict]) -> str:
+        if not papers:
+            return ""
+        items = []
+        for entry in papers[:3]:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("paper_title") or entry.get("title") or "").strip()
+            if not title:
+                continue
+            count = entry.get("count")
+            items.append(
+                f"{_escape_html(title)} ({count})" if count else _escape_html(title)
+            )
+        return "; ".join(items)
+
+    def _cluster_card(summary: dict) -> str:
+        cid = int(summary.get("cluster_id", -1))
+        label = _escape_html(label_by_id.get(cid, ""))
+        size = int(summary.get("size", 0))
+        evidence = summary.get("evidence", [])
+        top_evidence = _escape_html(evidence[0]) if evidence else ""
+        paper_count = summary.get("paper_count", "")
+        top_papers = _format_papers(summary.get("top_papers", []))
+
+        if not label:
+            return ""
+
+        return (
+            "<details style='background:var(--bg-elevated);border:1px solid var(--border);"
+            "border-radius:10px;padding:10px 12px;'>"
+            f"<summary style='cursor:pointer;font-size:0.84rem;font-weight:600;color:var(--text-primary);'>"
+            f"Cluster {cid} — {label or 'Unlabeled'} ({size} sentences)</summary>"
+            "<div style='margin-top:8px;font-size:0.78rem;color:var(--text-secondary);display:grid;gap:6px;'>"
+            f"<div><b>Top evidence:</b> {top_evidence}</div>"
+            f"<div><b>Papers:</b> {paper_count} | {top_papers}</div>"
+            "</div>"
+            "</details>"
+        )
+
+    if not isinstance(summaries, list) or not summaries:
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0 2px;'>"
+            "Cluster summaries are empty."
+            "</p>"
+        )
+
+    cards = "\n".join(filter(None, map(_cluster_card, summaries)))
+    if not cards:
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0 2px;'>"
+            "No labeled clusters yet. Run labeling or VERIFY to populate labels."
+            "</p>"
+        )
+    return (
+        "<div style='display:grid;gap:10px;'>"
+        "<div style='font-size:0.82rem;color:var(--text-secondary);font-weight:600;'>"
+        "Cluster details</div>"
+        f"{cards}"
+        "</div>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helper — placeholder chart HTML
 # ---------------------------------------------------------------------------
 def build_placeholder_chart(chart_type: str) -> str:
@@ -1081,6 +1190,12 @@ def build_app() -> gr.Blocks:
                             elem_classes=["btn-secondary"],
                         )
 
+                    # ── Tab 4: Clusters ─────────────────────────────────
+                    with gr.TabItem("Clusters", elem_classes=["tabitem"]):
+                        cluster_info_html = gr.HTML(
+                            value=build_cluster_info_html({}),
+                        )
+
         # ────────────────────────────────────────────────────────────────
         # Event wiring
         # ────────────────────────────────────────────────────────────────
@@ -1151,9 +1266,17 @@ def build_app() -> gr.Blocks:
                 *refresh_downloads(a),
                 get_chart_html(selected_chart, a),
                 build_cluster_stats_html(a),
+                build_cluster_info_html(a),
             ),
             inputs=[chart_selector, agent_state],
-            outputs=[review_table, download_file_list_html, download_files, chart_display, cluster_stats],
+            outputs=[
+                review_table,
+                download_file_list_html,
+                download_files,
+                chart_display,
+                cluster_stats,
+                cluster_info_html,
+            ],
         )
 
         # Auto-accept Phase 2 review when enabled.
