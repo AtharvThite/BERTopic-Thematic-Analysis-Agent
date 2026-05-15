@@ -83,8 +83,10 @@ LLM_MAX_RETRIES: int   = 3
 MAX_LABEL_CLUSTERS: int = 60
 MIN_CLUSTER_SIZE_FOR_LABEL: int = 20
 MAX_TOOL_RETURN_PREVIEW: int = 12
-PROVIDER_RETRY_ATTEMPTS: int = 3
-PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
+PROVIDER_RETRY_ATTEMPTS: int = 4
+PROVIDER_RETRY_BASE_DELAY_S: float = 2.0
+PROVIDER_RETRY_RATE_LIMIT_DELAY_S: float = 6.0
+PROVIDER_RETRY_MAX_DELAY_S: float = 18.0
 HDBSCAN_MIN_CLUSTER_SIZE: int = 20
 HDBSCAN_MIN_SAMPLES: int = 5
 HDBSCAN_MAX_CLUSTER_SIZE: int = 120
@@ -93,7 +95,9 @@ UMAP_MIN_DIST: float = 0.0
 UMAP_N_COMPONENTS_CLUSTER: int = 5
 UMAP_N_COMPONENTS_VIZ: int = 2
 AUTO_OPTIMIZE_CLUSTERS: bool = True
-OPTIMIZE_MAX_ITERS: int = 3
+OPTIMIZE_MAX_ITERS: int = 6
+OPTIMIZE_STABLE_ROUNDS: int = 2
+OPTIMIZE_MIN_IMPROVEMENT: float = 0.01
 OPTIMIZE_TARGET_CLUSTER_MIN: int = 20
 OPTIMIZE_TARGET_CLUSTER_MAX: int = 120
 OPTIMIZE_TARGET_NOISE_MAX: float = 0.50
@@ -417,6 +421,40 @@ def _normalize_hdbscan_suggestion(suggestion: dict, current: dict) -> dict:
     }
 
 
+def _metrics_in_target(metrics: dict) -> bool:
+    n_clusters = int(metrics.get("n_clusters", 0))
+    noise_ratio = float(metrics.get("noise_ratio", 1.0))
+    return (
+        OPTIMIZE_TARGET_CLUSTER_MIN <= n_clusters <= OPTIMIZE_TARGET_CLUSTER_MAX
+        and noise_ratio <= OPTIMIZE_TARGET_NOISE_MAX
+    )
+
+
+def _optimization_score(metrics: dict) -> float:
+    n_clusters = int(metrics.get("n_clusters", 0))
+    noise_ratio = float(metrics.get("noise_ratio", 1.0))
+
+    if n_clusters < OPTIMIZE_TARGET_CLUSTER_MIN:
+        cluster_penalty = (OPTIMIZE_TARGET_CLUSTER_MIN - n_clusters) / max(
+            OPTIMIZE_TARGET_CLUSTER_MIN,
+            1,
+        )
+    elif n_clusters > OPTIMIZE_TARGET_CLUSTER_MAX:
+        cluster_penalty = (n_clusters - OPTIMIZE_TARGET_CLUSTER_MAX) / max(
+            OPTIMIZE_TARGET_CLUSTER_MAX,
+            1,
+        )
+    else:
+        cluster_penalty = 0.0
+
+    noise_penalty = max(0.0, noise_ratio - OPTIMIZE_TARGET_NOISE_MAX) / max(
+        OPTIMIZE_TARGET_NOISE_MAX,
+        1e-6,
+    )
+
+    return 1.0 - min(1.0, cluster_penalty + noise_penalty)
+
+
 def _load_sentence_meta(run_key: str, sentences: list[str]) -> list[dict]:
     meta_path = OUTPUT_DIR / run_key / "sentence_meta.json"
     if not meta_path.exists():
@@ -502,6 +540,17 @@ def _is_transient_provider_error(exc: Exception) -> bool:
     )
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "rate limit" in msg
+        or "too many requests" in msg
+        or '"raw_status_code":429' in msg
+        or '"status":429' in msg
+        or "status code: 429" in msg
+    )
+
+
 def _invoke_with_retries(fn):
     """Run an LLM call with bounded linear backoff on transient provider errors."""
     last_exc: Exception | None = None
@@ -513,7 +562,10 @@ def _invoke_with_retries(fn):
                 raise
             last_exc = exc
             if attempt < PROVIDER_RETRY_ATTEMPTS - 1:
-                time.sleep(PROVIDER_RETRY_BASE_DELAY_S * (attempt + 1))
+                delay = PROVIDER_RETRY_BASE_DELAY_S * (attempt + 1)
+                if _is_rate_limit_error(exc):
+                    delay = max(delay, PROVIDER_RETRY_RATE_LIMIT_DELAY_S * (attempt + 1))
+                time.sleep(min(PROVIDER_RETRY_MAX_DELAY_S, delay))
                 continue
             raise last_exc
 
@@ -901,6 +953,9 @@ def run_bertopic_discovery(
         }
     ]
 
+    best_score = _optimization_score(metrics)
+    stable_rounds = 0
+
     seen_params = {(
         current_params["min_cluster_size"],
         current_params["max_cluster_size"],
@@ -911,6 +966,13 @@ def run_bertopic_discovery(
         for round_idx in range(1, int(max_optimize_iters) + 1):
             suggestion = _recommend_hdbscan_params(metrics, current_params)
             if suggestion.get("action") == "accept":
+                optimization_log.append({
+                    "round": round_idx,
+                    "params": current_params,
+                    "metrics": metrics,
+                    "action": "accept",
+                    "reasoning": suggestion.get("reasoning", ""),
+                })
                 break
 
             next_params = {
@@ -924,6 +986,13 @@ def run_bertopic_discovery(
                 next_params["min_samples"],
             )
             if next_key in seen_params:
+                optimization_log.append({
+                    "round": round_idx,
+                    "params": current_params,
+                    "metrics": metrics,
+                    "action": "stop",
+                    "reasoning": "Repeated parameter set; stopping optimization.",
+                })
                 break
 
             labels, metrics = _run_hdbscan(next_params)
@@ -935,6 +1004,19 @@ def run_bertopic_discovery(
             })
             current_params = next_params
             seen_params.add(next_key)
+
+            score = _optimization_score(metrics)
+            if score <= best_score + OPTIMIZE_MIN_IMPROVEMENT:
+                stable_rounds += 1
+            else:
+                best_score = score
+                stable_rounds = 0
+
+            if _metrics_in_target(metrics):
+                break
+
+            if stable_rounds >= OPTIMIZE_STABLE_ROUNDS:
+                break
 
     optimization_path = rdir / "optimization.json"
     _save_json(optimization_path, optimization_log)

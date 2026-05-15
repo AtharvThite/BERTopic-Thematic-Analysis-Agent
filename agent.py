@@ -92,8 +92,10 @@ DEFAULT_RUN_KEY: str = "abstract"
 THREAD_PREFIX:   str = "TA-"
 MAX_USER_MESSAGE_CHARS: int = 4000
 VERIFY_CHAT_MAX_ROWS: int = 20
-PROVIDER_RETRY_ATTEMPTS: int = 3
-PROVIDER_RETRY_BASE_DELAY_S: float = 1.5
+PROVIDER_RETRY_ATTEMPTS: int = 4
+PROVIDER_RETRY_BASE_DELAY_S: float = 2.0
+PROVIDER_RETRY_RATE_LIMIT_DELAY_S: float = 6.0
+PROVIDER_RETRY_MAX_DELAY_S: float = 18.0
 
 # FIX ISSUE 4 — surface missing API key immediately at import time
 _KEY_MISSING = not bool(MISTRAL_API_KEY)
@@ -743,7 +745,22 @@ def _is_transient_provider_error(exc: Exception) -> bool:
         or '"raw_status_code":503' in msg
         or '"raw_status_code":502' in msg
         or '"raw_status_code":504' in msg
+        or '"raw_status_code":429' in msg
+        or '"status":429' in msg
+        or "too many requests" in msg
+        or "rate limit" in msg
         or "service unavailable" in msg
+    )
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "rate limit" in msg
+        or "too many requests" in msg
+        or '"raw_status_code":429' in msg
+        or '"status":429' in msg
+        or "status code: 429" in msg
     )
 
 
@@ -763,7 +780,10 @@ def _invoke_react_with_retries(enriched: str, thread_id: str) -> dict:
                 raise
             last_exc = exc
             if attempt < PROVIDER_RETRY_ATTEMPTS - 1:
-                time.sleep(PROVIDER_RETRY_BASE_DELAY_S * (attempt + 1))
+                delay = PROVIDER_RETRY_BASE_DELAY_S * (attempt + 1)
+                if _is_rate_limit_error(exc):
+                    delay = max(delay, PROVIDER_RETRY_RATE_LIMIT_DELAY_S * (attempt + 1))
+                time.sleep(min(PROVIDER_RETRY_MAX_DELAY_S, delay))
                 continue
             raise last_exc
 
@@ -935,6 +955,13 @@ def _populate_review_df(state: dict) -> dict:
             "Approve", "Rename To", "Reasoning"
     """
     labels_path = OUTPUT_DIR / state.get("run_key", DEFAULT_RUN_KEY) / "labels.json"
+    summaries_path = OUTPUT_DIR / state.get("run_key", DEFAULT_RUN_KEY) / "summaries.json"
+    summaries = _load_json(summaries_path) if summaries_path.exists() else []
+    summary_by_id = {
+        int(item.get("cluster_id", -1)): item
+        for item in summaries
+        if isinstance(item, dict)
+    }
 
     def _reasoning_cell(row: dict) -> str:
                 return str(
@@ -943,8 +970,12 @@ def _populate_review_df(state: dict) -> dict:
                 ).strip()
 
     def _papers_cell(row: dict) -> str:
+        cid = int(row.get("cluster_id", row.get("#", -1)) or -1)
+        summary = summary_by_id.get(cid, {})
         count = row.get("paper_count")
-        top_papers = row.get("top_papers", [])
+        if count is None:
+            count = summary.get("paper_count")
+        top_papers = row.get("top_papers") or summary.get("top_papers", [])
         if isinstance(top_papers, list) and top_papers:
             titles = []
             for entry in top_papers[:3]:
