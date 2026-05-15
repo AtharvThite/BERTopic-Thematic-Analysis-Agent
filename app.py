@@ -719,16 +719,61 @@ def submit_review(review_df, agent_state: dict, chat_history: list):
     FIX BUG 3 — write parsed review rows into agent_state["review_df"]
     BEFORE calling the agent, so _parse_review_df() receives the populated list.
     """
+    def _next_phase_message(state: dict) -> str:
+        gate = state.get("stop_gate")
+        if gate == "STOP_GATE_1_AWAIT_REVIEW_TABLE":
+            return "Review table submitted. Please proceed to Phase 3 and consolidate themes."
+        if gate == "STOP_GATE_2_AWAIT_THEME_MERGE":
+            return "Theme merge confirmed. Please proceed to Phase 4 for saturation check."
+        if gate == "STOP_GATE_3_AWAIT_SATURATION_SIGNOFF":
+            return "Saturation sign-off confirmed. Please proceed to Phase 5 for naming themes."
+        if gate == "STOP_GATE_4_AWAIT_TAXONOMY_REVIEW":
+            return "Taxonomy review confirmed. Please proceed to Phase 6 to finalize outputs."
+        return "Review table submitted. Please proceed to the next phase."
+
     # Store the review table in state so agent.py can read it
     agent_state["review_df"] = review_df.to_dict(orient="records")
     agent_state["review_submitted"] = True
 
     # Send a short trigger message — the agent reads state, not the payload
-    msg = "Review table submitted. Please proceed to Phase 3 and consolidate themes."
+    msg = _next_phase_message(agent_state)
     results = []
     for state in handle_chat(msg, chat_history, agent_state):
         results = state
     new_history, new_state, phase_html = results
+    return new_history, new_state, phase_html
+
+
+def auto_accept_review(agent_state: dict, chat_history: list, enabled: bool):
+    """Auto-approve Phase 2 review rows and submit when enabled."""
+    if not enabled:
+        return chat_history, agent_state, build_phase_html(agent_state.get("phase", 0))
+
+    gate = agent_state.get("stop_gate")
+    if gate != "STOP_GATE_1_AWAIT_REVIEW_TABLE":
+        return chat_history, agent_state, build_phase_html(agent_state.get("phase", 0))
+
+    if agent_state.get("review_submitted"):
+        return chat_history, agent_state, build_phase_html(agent_state.get("phase", 0))
+
+    if agent_state.get("auto_accept_last_gate") == gate:
+        return chat_history, agent_state, build_phase_html(agent_state.get("phase", 0))
+
+    rows = agent_state.get("review_df", [])
+    if not rows:
+        return chat_history, agent_state, build_phase_html(agent_state.get("phase", 0))
+
+    df = pd.DataFrame(rows)
+    if "Approve" in df.columns:
+        df["Approve"] = True
+    if "Rename To" in df.columns and "Topic Label" in df.columns:
+        df["Rename To"] = df["Rename To"].fillna("").astype(str)
+        df["Rename To"] = df.apply(
+            lambda r: r["Rename To"] or r["Topic Label"], axis=1
+        )
+
+    new_history, new_state, phase_html = submit_review(df, agent_state, chat_history)
+    new_state["auto_accept_last_gate"] = gate
     return new_history, new_state, phase_html
 
 
@@ -878,6 +923,7 @@ def build_app() -> gr.Blocks:
                             and use the <b>Papers</b> column to see the top 3 paper titles per cluster.
                             then click <b>Submit Review</b>. Use <b>verify</b> in chat at Phase 2
                             or Phase 5.5 to see Mistral vs Groq comparisons directly in chat output.
+                            Enable <b>Auto-accept Phase 2 review</b> to skip manual submission.
                         </p>""")
 
                         review_table = gr.Dataframe(
@@ -905,6 +951,11 @@ def build_app() -> gr.Blocks:
                                 scale=2,
                                 elem_classes=["btn-success"],
                             )
+
+                        auto_accept_toggle = gr.Checkbox(
+                            label="Auto-accept Phase 2 review and continue",
+                            value=False,
+                        )
 
                     # ── Tab 2: Charts ───────────────────────────────────
                     with gr.TabItem("Charts", elem_classes=["tabitem"]):
@@ -1014,6 +1065,13 @@ def build_app() -> gr.Blocks:
             ),
             inputs=[chart_selector, agent_state],
             outputs=[review_table, download_file_list_html, download_files, chart_display],
+        )
+
+        # Auto-accept Phase 2 review when enabled.
+        chatbot.change(
+            fn=auto_accept_review,
+            inputs=[agent_state, chatbot, auto_accept_toggle],
+            outputs=[chatbot, agent_state, phase_bar],
         )
 
     return app
