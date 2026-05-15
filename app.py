@@ -597,6 +597,89 @@ def build_file_list_html(paths: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Helper — cluster stats HTML
+# ---------------------------------------------------------------------------
+def build_cluster_stats_html(agent_state: dict) -> str:
+    run_key = agent_state.get("run_key", "abstract")
+    opt_path = OUTPUTS_DIR / run_key / "optimization.json"
+    if not opt_path.exists():
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0 2px;'>"
+            "No clustering stats yet. Run topic discovery to generate optimization stats."
+            "</p>"
+        )
+
+    try:
+        rounds = json.loads(opt_path.read_text(encoding="utf-8"))
+    except Exception:
+        rounds = []
+
+    if not isinstance(rounds, list) or not rounds:
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0 2px;'>"
+            "Optimization stats are unavailable or empty."
+            "</p>"
+        )
+
+    first = rounds[0]
+    last = rounds[-1]
+    first_clusters = int(first.get("metrics", {}).get("n_clusters", 0))
+    last_clusters = int(last.get("metrics", {}).get("n_clusters", 0))
+
+    before_round = first
+    after_round = last
+    if last_clusters > first_clusters:
+        before_round, after_round = last, first
+
+    def _metrics_block(metrics: dict) -> str:
+        if not isinstance(metrics, dict):
+            return "<div style='color:var(--text-muted);'>No metrics</div>"
+        return (
+            "<div style='display:grid;gap:4px;font-size:0.78rem;'>"
+            f"<div>Clusters: <b>{int(metrics.get('n_clusters', 0))}</b></div>"
+            f"<div>Noise ratio: <b>{metrics.get('noise_ratio', 0.0):.2f}</b></div>"
+            f"<div>Min/Med/Mean/Max size: <b>{metrics.get('min_size', 0):.0f}</b> / "
+            f"<b>{metrics.get('median_size', 0):.0f}</b> / "
+            f"<b>{metrics.get('mean_size', 0):.0f}</b> / "
+            f"<b>{metrics.get('max_size', 0):.0f}</b></div>"
+            "</div>"
+        )
+
+    def _params_line(params: dict) -> str:
+        if not isinstance(params, dict):
+            return ""
+        return (
+            f"min_cluster_size={params.get('min_cluster_size', '')}, "
+            f"max_cluster_size={params.get('max_cluster_size', '')}, "
+            f"min_samples={params.get('min_samples', '')}"
+        )
+
+    before_label = "Before optimization (more)"
+    after_label = "After optimization (less)" if len(rounds) > 1 else "After optimization (no change)"
+
+    return f"""
+    <div style='display:grid;gap:10px;'>
+        <div style='font-size:0.82rem;color:var(--text-secondary);font-weight:600;'>Cluster stats</div>
+        <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;'>
+            <div style='background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:10px 12px;'>
+                <div style='font-size:0.78rem;color:var(--text-secondary);margin-bottom:6px;'>{before_label}</div>
+                <div style='font-size:0.74rem;color:var(--text-muted);margin-bottom:6px;'>
+                    {_params_line(before_round.get('params', {}))}
+                </div>
+                {_metrics_block(before_round.get('metrics', {}))}
+            </div>
+            <div style='background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:10px 12px;'>
+                <div style='font-size:0.78rem;color:var(--text-secondary);margin-bottom:6px;'>{after_label}</div>
+                <div style='font-size:0.74rem;color:var(--text-muted);margin-bottom:6px;'>
+                    {_params_line(after_round.get('params', {}))}
+                </div>
+                {_metrics_block(after_round.get('metrics', {}))}
+            </div>
+        </div>
+    </div>"""
+
+
+# ---------------------------------------------------------------------------
 # Helper — placeholder chart HTML
 # ---------------------------------------------------------------------------
 def build_placeholder_chart(chart_type: str) -> str:
@@ -913,6 +996,10 @@ def build_app() -> gr.Blocks:
             with gr.Column(elem_classes=["panel-card", "panel-results"]):
                 gr.HTML("""<div class="card-title"><span>Results</span></div>""")
 
+                cluster_stats = gr.HTML(
+                    value=build_cluster_stats_html({}),
+                )
+
                 with gr.Tabs(elem_classes=["tabs"]):
 
                     # ── Tab 1: Review Table ─────────────────────────────
@@ -1063,9 +1150,10 @@ def build_app() -> gr.Blocks:
                 refresh_review_table(a),
                 *refresh_downloads(a),
                 get_chart_html(selected_chart, a),
+                build_cluster_stats_html(a),
             ),
             inputs=[chart_selector, agent_state],
-            outputs=[review_table, download_file_list_html, download_files, chart_display],
+            outputs=[review_table, download_file_list_html, download_files, chart_display, cluster_stats],
         )
 
         # Auto-accept Phase 2 review when enabled.
