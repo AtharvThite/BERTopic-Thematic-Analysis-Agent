@@ -964,10 +964,11 @@ def _populate_review_df(state: dict) -> dict:
     }
 
     def _reasoning_cell(row: dict) -> str:
-                return str(
-                        row.get("mistral_reasoning")
-                        or row.get("reasoning", "")
-                ).strip()
+        return str(
+            row.get("adjudicated_reasoning")
+            or row.get("mistral_reasoning")
+            or row.get("reasoning", "")
+        ).strip()
 
     def _papers_cell(row: dict) -> str:
         cid = int(row.get("cluster_id", row.get("#", -1)) or -1)
@@ -1001,18 +1002,26 @@ def _populate_review_df(state: dict) -> dict:
 
         return str(count) if count else ""
 
+    def _label_value(row: dict) -> str:
+        return str(
+            row.get("adjudicated_label")
+            or row.get("mistral_label")
+            or row.get("label")
+            or ""
+        ).strip()
+
     return (
         {
             **state,
             "review_df": list(map(
                 lambda r: {
                     "#":           r.get("cluster_id", 0),
-                    "Topic Label": r.get("label") or r.get("mistral_label", ""),
+                    "Topic Label": _label_value(r),
                     "Top Evidence":r["evidence"][0] if r.get("evidence") else "",
                     "Sentences":   r.get("size", 0),
                     "Papers":      _papers_cell(r),
                     "Approve":     False,
-                    "Rename To":   r.get("label") or r.get("mistral_label", ""),
+                    "Rename To":   _label_value(r),
                     "Reasoning":   _reasoning_cell(r),
                 },
                 _load_json(labels_path),
@@ -1092,15 +1101,16 @@ def _build_verify_chat_report(rows: list[dict]) -> str:
 
     shown = rows[:VERIFY_CHAT_MAX_ROWS]
     header = [
-        "| # | Mistral Label | Groq-Ollama Label | Groq-GPT Label |",
-        "|---|---|---|---|",
+        "| # | Mistral Label | Groq-Ollama Label | Groq-GPT Label | Best Label |",
+        "|---|---|---|---|---|",
     ]
     lines = list(map(
         lambda r: (
             f"| {int(r.get('cluster_id', 0))} "
             f"| {_sanitize_markdown_cell(r.get('mistral_label') or r.get('label', ''))} "
             f"| {_sanitize_markdown_cell(r.get('groq_ollama_label') or r.get('groq_label', ''))} "
-            f"| {_sanitize_markdown_cell(r.get('groq_gpt_label', ''))} |"
+            f"| {_sanitize_markdown_cell(r.get('groq_gpt_label', ''))} "
+            f"| {_sanitize_markdown_cell(r.get('adjudicated_label', ''))} |"
         ),
         shown,
     ))
@@ -1183,7 +1193,7 @@ def _handle_verify_command(state: dict) -> tuple[str, dict]:
         reply = (
             "VERIFY complete. Groq-Ollama and Groq-GPT topic labeling has been added for Phase 2 topics.\n\n"
             f"Verified topics: {verified_count}/{labelled_count}\n"
-            "Mistral vs Groq-Ollama vs Groq-GPT comparison is shown below in chat.\n\n"
+            "Mistral vs Groq-Ollama vs Groq-GPT comparison (plus adjudicated best label) is shown below in chat.\n\n"
             f"{report}\n\n"
             "Compare labels, edit Rename To/Approve, then click Submit Review to continue.\n\n"
             "[STOP GATE 1 — AWAITING REVIEW TABLE SUBMISSION]"

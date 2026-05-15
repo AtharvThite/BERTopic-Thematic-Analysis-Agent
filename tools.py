@@ -72,6 +72,7 @@ GROQ_API_KEY: str      = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL_NAME: str   = os.environ.get("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
 GROQ_OLLAMA_MODEL_NAME: str = os.environ.get("GROQ_OLLAMA_MODEL_NAME", "llama-3.3-70b-versatile")
 GROQ_GPT_MODEL_NAME: str    = os.environ.get("GROQ_GPT_MODEL_NAME", "openai/gpt-oss-120b")
+GROQ_JUDGE_MODEL_NAME: str  = os.environ.get("GROQ_JUDGE_MODEL_NAME", "llama-3.1-8b-instant")
 EMBED_MODEL:     str   = "allenai/specter2_base"
 BASE_DIR:        Path  = Path(__file__).resolve().parent
 OUTPUT_DIR:      Path  = BASE_DIR / "outputs"
@@ -295,6 +296,10 @@ def _groq_ollama_enabled() -> bool:
 
 def _groq_gpt_enabled() -> bool:
     return bool(GROQ_API_KEY) and ChatGroq is not None and bool(GROQ_GPT_MODEL_NAME)
+
+
+def _groq_judge_enabled() -> bool:
+    return bool(GROQ_API_KEY) and ChatGroq is not None and bool(GROQ_JUDGE_MODEL_NAME)
 
 
 def _to_float(value: object, fallback: float = 0.0) -> float:
@@ -1118,6 +1123,50 @@ Respond with RAW JSON only. No markdown, no explanation outside the JSON.
 )
 
 
+_LABEL_JUDGE_PROMPT = PromptTemplate.from_template(
+     """You are an expert label adjudicator. Choose the single best label from
+the candidates below based on the evidence sentences.
+
+Cluster ID    : {cluster_id}
+Sentence count: {size}
+Evidence sentences:
+{evidence}
+
+Candidate labels:
+1) Mistral
+    Label: {mistral_label}
+    Category: {mistral_category}
+    Confidence: {mistral_confidence}
+    Reasoning: {mistral_reasoning}
+
+2) Groq-Ollama
+    Label: {groq_ollama_label}
+    Category: {groq_ollama_category}
+    Confidence: {groq_ollama_confidence}
+    Reasoning: {groq_ollama_reasoning}
+
+3) Groq-GPT
+    Label: {groq_gpt_label}
+    Category: {groq_gpt_category}
+    Confidence: {groq_gpt_confidence}
+    Reasoning: {groq_gpt_reasoning}
+
+Rules:
+- Choose exactly one of the three labels. Do not invent a new label.
+- Pick the label that best matches the evidence and is most specific.
+- If two are equally good, prefer the one with higher confidence.
+
+Return RAW JSON with exactly these keys:
+  best_label: string
+  best_category: string
+  chosen_source: string  # one of: mistral, groq_ollama, groq_gpt
+  best_reasoning: string
+
+Respond with RAW JSON only.
+"""
+)
+
+
 @tool
 def label_topics_with_llm(run_key: str) -> dict:
     """
@@ -1241,7 +1290,8 @@ def label_topics_with_llm(run_key: str) -> dict:
 def verify_topic_labels_with_groq(run_key: str) -> dict:
     """
     Run Groq topic labeling for already-labeled topics and append comparison fields
-    into labels.json so UI review table can show Mistral vs Groq-Ollama vs Groq-GPT labels.
+    into labels.json so UI review table can show Mistral vs Groq-Ollama vs Groq-GPT labels,
+    plus an adjudicated best label when GROQ_JUDGE_MODEL_NAME is configured.
 
     Parameters
     ----------
@@ -1307,6 +1357,11 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
 
     chain_groq_ollama = _LABEL_PROMPT | _llm_groq(GROQ_OLLAMA_MODEL_NAME) | JsonOutputParser()
     chain_groq_gpt = _LABEL_PROMPT | _llm_groq(GROQ_GPT_MODEL_NAME) | JsonOutputParser()
+    chain_judge = (
+        _LABEL_JUDGE_PROMPT | _llm_groq(GROQ_JUDGE_MODEL_NAME) | JsonOutputParser()
+        if _groq_judge_enabled()
+        else None
+    )
 
     def _evidence_block(summary: dict) -> str:
         return "\n".join(
@@ -1330,15 +1385,50 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
     groq_ollama_by_id = {cid: data for cid, data, _ in groq_pairs}
     groq_gpt_by_id = {cid: data for cid, _, data in groq_pairs}
 
+    def _judge_label(row: dict) -> tuple[int, dict]:
+        if chain_judge is None:
+            return int(row.get("cluster_id", -1)), {}
+        cid = int(row.get("cluster_id", -1))
+        summary = summary_by_id[cid]
+        groq_ollama = groq_ollama_by_id.get(cid, {})
+        groq_gpt = groq_gpt_by_id.get(cid, {})
+        payload = {
+            "cluster_id": summary.get("cluster_id"),
+            "size": summary.get("size"),
+            "evidence": _evidence_block(summary),
+            "mistral_label": str(row.get("mistral_label") or row.get("label", "")).strip(),
+            "mistral_category": str(row.get("mistral_category") or row.get("category", "")).strip(),
+            "mistral_confidence": _to_float(row.get("mistral_confidence", row.get("confidence", 0.0)), 0.0),
+            "mistral_reasoning": str(row.get("mistral_reasoning") or row.get("reasoning", "")).strip(),
+            "groq_ollama_label": str(groq_ollama.get("label", "")).strip(),
+            "groq_ollama_category": str(groq_ollama.get("category", "")).strip(),
+            "groq_ollama_confidence": _to_float(groq_ollama.get("confidence"), 0.0),
+            "groq_ollama_reasoning": str(groq_ollama.get("reasoning", "")).strip(),
+            "groq_gpt_label": str(groq_gpt.get("label", "")).strip(),
+            "groq_gpt_category": str(groq_gpt.get("category", "")).strip(),
+            "groq_gpt_confidence": _to_float(groq_gpt.get("confidence"), 0.0),
+            "groq_gpt_reasoning": str(groq_gpt.get("reasoning", "")).strip(),
+        }
+        try:
+            result = _invoke_with_retries(lambda: chain_judge.invoke(payload))
+        except Exception:
+            result = {}
+        return cid, result
+
+    judge_pairs = list(map(_judge_label, target_rows)) if chain_judge else []
+    judge_by_id = {cid: data for cid, data in judge_pairs}
+
     def _merge_row(row: dict) -> dict:
         cid = int(row.get("cluster_id", -1))
         groq_ollama = groq_ollama_by_id.get(cid, {})
         groq_gpt = groq_gpt_by_id.get(cid, {})
+        adjudicated = judge_by_id.get(cid, {})
         has_groq_ollama = bool(groq_ollama)
         has_groq_gpt = bool(groq_gpt)
         mistral_label = str(row.get("mistral_label") or row.get("label", "")).strip()
         groq_ollama_label = str(groq_ollama.get("label", "")).strip()
         groq_gpt_label = str(groq_gpt.get("label", "")).strip()
+        adjudicated_label = str(adjudicated.get("best_label", "")).strip()
         is_agreement = (
             all([mistral_label, groq_ollama_label, groq_gpt_label])
             and mistral_label.lower() == groq_ollama_label.lower()
@@ -1370,6 +1460,16 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
             "groq_gpt_confidence": _to_float(groq_gpt.get("confidence"), 0.0),
             "groq_gpt_reasoning": groq_gpt.get("reasoning", ""),
             "groq_gpt_niche":     bool(groq_gpt.get("niche", False)),
+            "adjudicated_label":  adjudicated_label,
+            "adjudicated_category": str(adjudicated.get("best_category", "")).strip(),
+            "adjudicated_reasoning": str(adjudicated.get("best_reasoning", "")).strip(),
+            "adjudicated_source": str(adjudicated.get("chosen_source", "")).strip(),
+            "adjudication_done":  bool(adjudicated_label),
+            "adjudication_note": (
+                "Adjudicated label available."
+                if adjudicated_label
+                else "Adjudication unavailable for this topic."
+            ),
             "verification_done":  has_groq_ollama and has_groq_gpt,
             "verification_done_ollama": has_groq_ollama,
             "verification_done_gpt": has_groq_gpt,
@@ -1393,6 +1493,7 @@ def verify_topic_labels_with_groq(run_key: str) -> dict:
             "mistral_label": r.get("mistral_label", ""),
             "groq_ollama_label": r.get("groq_ollama_label", r.get("groq_label", "")),
             "groq_gpt_label": r.get("groq_gpt_label", ""),
+            "adjudicated_label": r.get("adjudicated_label", ""),
             "verification_note": r.get("verification_note", ""),
         },
         verified_rows[:MAX_TOOL_RETURN_PREVIEW],

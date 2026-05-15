@@ -55,6 +55,7 @@ export HF_TOKEN="your-hf-token"  # optional but recommended for model downloads
 # Optional: Groq models for VERIFY command
 export GROQ_OLLAMA_MODEL_NAME="llama-3.3-70b-versatile"  # Groq-Ollama label verification
 export GROQ_GPT_MODEL_NAME="gpt-oss-20b"                 # Groq-GPT label verification
+export GROQ_JUDGE_MODEL_NAME="llama-3.1-8b-instant"      # Adjudicate best label from the 3 models
 ```
 
 ## Run
@@ -86,7 +87,7 @@ Additional columns are allowed.
 2. The app auto-triggers Phase 1 context once upload succeeds.
 3. In chat, start discovery with `run abstract`.
 4. Optionally run other corpora with `run title` and `run keywords`.
-5. At Phase 2, optionally type `VERIFY` in chat to display Mistral vs Groq-Ollama vs Groq-GPT topic-label comparison in chat output.
+5. At Phase 2, optionally type `VERIFY` in chat to display Mistral vs Groq-Ollama vs Groq-GPT labels plus the adjudicated best label.
 6. Review generated topics in the Review tab and approve/rename as needed.
 7. Edit `Approve`, `Rename To`, and `Reasoning`, then click Submit Review.
 8. Continue phase-by-phase through theme consolidation, review, naming, taxonomy mapping, and report generation.
