@@ -36,6 +36,19 @@ from pathlib import Path
 from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
+# Method extraction tools — direct invocation (standalone tab, no agent)
+# ---------------------------------------------------------------------------
+try:
+    from tools import (
+        extract_methods_from_pdfs,
+        OUTPUT_DIR as TOOLS_OUTPUT_DIR,
+        _load_json as tools_load_json,
+    )
+    METHOD_TOOLS_AVAILABLE = True
+except ImportError:
+    METHOD_TOOLS_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Agent import — graceful stub when agent.py is absent during dev/testing
 # ---------------------------------------------------------------------------
 try:
@@ -86,6 +99,7 @@ EMPTY_REVIEW_DF = pd.DataFrame(columns=REVIEW_COLUMNS)
 MISTRAL_KEY_MISSING = not bool(os.environ.get("MISTRAL_API_KEY", ""))
 GROQ_KEY_MISSING = not bool(os.environ.get("GROQ_API_KEY", ""))
 UPLOADS_DIR = Path("uploads")
+PDF_UPLOADS_DIR = Path("uploads") / "pdfs"
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 
 # ---------------------------------------------------------------------------
@@ -812,6 +826,158 @@ def build_placeholder_chart(chart_type: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Method Extraction — helper functions
+# ---------------------------------------------------------------------------
+
+def build_method_stats_html(result: dict) -> str:
+    """Build stats HTML for method extraction results."""
+    if not result or result.get("error"):
+        return (
+            "<p style='color:var(--text-muted);font-size:0.83rem;padding:6px 0;'>"
+            "Upload PDFs and click <b>Run Method Extraction</b> to start."
+            "</p>"
+        )
+    n_papers = result.get("n_papers", 0)
+    n_extracted = result.get("n_extracted", 0)
+    return f"""
+    <div class="stats-grid fade-in" style="grid-template-columns:1fr 1fr;">
+        <div class="stat-card accent">
+            <div class="stat-value">{n_papers}</div>
+            <div class="stat-label">PDFs Processed</div>
+        </div>
+        <div class="stat-card success">
+            <div class="stat-value">{n_extracted}</div>
+            <div class="stat-label">Methods Identified</div>
+        </div>
+    </div>
+    """
+
+
+def get_method_results_df() -> pd.DataFrame:
+    """Return the method summary dataframe."""
+    columns = [
+        "Paper ID",
+        "Paper Title",
+        "Computational Methods",
+    ]
+    csv_path = OUTPUTS_DIR / "methods" / "method_summary.csv"
+    if csv_path.exists():
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            return pd.DataFrame(columns=columns)
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+        return df[columns]
+    return pd.DataFrame(columns=columns)
+
+
+def get_method_technique_df() -> pd.DataFrame:
+    """Return the technique-to-papers summary dataframe."""
+    columns = ["Computational Method", "Papers"]
+    csv_path = OUTPUTS_DIR / "methods" / "technique_to_papers.csv"
+    if csv_path.exists():
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            return pd.DataFrame(columns=columns)
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+        return df[columns]
+    return pd.DataFrame(columns=columns)
+
+
+def get_method_download_file() -> list[str]:
+    """Return downloadable method CSV."""
+    technique_path = OUTPUTS_DIR / "methods" / "technique_to_papers.csv"
+    if technique_path.exists():
+        return [str(technique_path)]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Method Extraction — interaction handlers
+# ---------------------------------------------------------------------------
+
+def handle_pdf_upload(file_objs):
+    """Copy uploaded PDFs to a stable directory."""
+    if not file_objs:
+        return (
+            "<div class='status-pill idle'><div class='dot'></div>No PDFs uploaded</div>",
+            "<p style='color:var(--text-muted);font-size:0.83rem;'>Upload PDF research papers to extract methods.</p>",
+        )
+
+    PDF_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    # Clear previous uploads
+    for old in PDF_UPLOADS_DIR.glob("*.pdf"):
+        old.unlink()
+    for old in PDF_UPLOADS_DIR.glob("*.PDF"):
+        old.unlink()
+
+    count = 0
+    for f in file_objs:
+        src = Path(f.name) if hasattr(f, 'name') else Path(f)
+        if src.suffix.lower() == ".pdf":
+            dst = PDF_UPLOADS_DIR / f"{uuid.uuid4().hex[:8]}_{src.name}"
+            shutil.copy2(src, dst)
+            count += 1
+
+    status = f"<div class='status-pill ready'><div class='dot'></div>{count} PDFs ready</div>"
+    stats = f"""
+    <div class="stats-grid fade-in">
+        <div class="stat-card accent">
+            <div class="stat-value">{count}</div>
+            <div class="stat-label">PDFs Uploaded</div>
+        </div>
+    </div>"""
+    return status, stats
+
+
+def run_method_extraction_pipeline():
+    """Run the method extraction pipeline."""
+    if not METHOD_TOOLS_AVAILABLE:
+        return (
+            build_method_stats_html({"error": True}),
+            "<div class='status-pill idle'><div class='dot'></div>Tools unavailable</div>",
+            get_method_technique_df(),
+            get_method_download_file(),
+        )
+
+    pdf_dir = str(PDF_UPLOADS_DIR.resolve())
+    if not PDF_UPLOADS_DIR.exists() or not list(PDF_UPLOADS_DIR.glob("*.pdf")) + list(PDF_UPLOADS_DIR.glob("*.PDF")):
+        return (
+            "<p style='color:var(--danger);font-size:0.83rem;'>No PDFs found. Upload PDFs first.</p>",
+            "<div class='status-pill idle'><div class='dot'></div>No PDFs</div>",
+            get_method_technique_df(),
+            get_method_download_file(),
+        )
+
+    # Step 1: Extract + LLM Processing
+    result = extract_methods_from_pdfs.invoke({"pdf_dir": pdf_dir})
+
+    if isinstance(result, dict) and result.get("error"):
+        return (
+            f"<p style='color:var(--danger);font-size:0.83rem;'>{result['error']}</p>",
+            "<div class='status-pill idle'><div class='dot'></div>Extraction failed</div>",
+            get_method_technique_df(),
+            get_method_download_file(),
+        )
+
+    # Build UI outputs
+    stats_html = build_method_stats_html(result)
+    status_html = "<div class='status-pill ready'><div class='dot'></div>Extraction complete</div>"
+
+    return (
+        stats_html,
+        status_html,
+        get_method_technique_df(),
+        get_method_download_file(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core interaction handlers
 # ---------------------------------------------------------------------------
 
@@ -1196,6 +1362,64 @@ def build_app() -> gr.Blocks:
                             value=build_cluster_info_html({}),
                         )
 
+            # ── METHOD EXTRACTION — Standalone panel ──────────────────────
+            with gr.Column(elem_classes=["panel-card"]):
+                gr.HTML("""
+                <div class="card-title">
+                    <span>📄 Computational Methodology Extraction</span>
+                </div>
+                <p style='font-size:0.78rem;color:var(--text-muted);margin:0 0 12px;'>
+                    Upload research PDFs to identify the specific computational methods
+                    used in each paper (text-only extraction via PyMuPDF + LLM).
+                </p>
+                """)
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        pdf_upload = gr.File(
+                            label="Upload Research PDFs",
+                            file_types=[".pdf"],
+                            file_count="multiple",
+                            interactive=True,
+                            elem_id="pdf-upload",
+                        )
+                    with gr.Column(scale=1):
+                        method_status = gr.HTML(
+                            value="<div class='status-pill idle'><div class='dot'></div>Awaiting PDF upload</div>"
+                        )
+                        method_stats = gr.HTML(
+                            value="<p style='color:var(--text-muted);font-size:0.83rem;'>"
+                                  "Upload PDF research papers to extract methods.</p>"
+                        )
+
+                run_methods_btn = gr.Button(
+                    "🚀 Extract Computational Methods",
+                    variant="primary",
+                    elem_classes=["btn-primary"],
+                )
+
+                gr.HTML("<hr style='border:none;border-top:1px solid var(--border);margin:12px 0;'>")
+
+                # Results Dataframe
+                gr.HTML("""
+                <div style='font-size:0.82rem;color:var(--text-secondary);font-weight:600;margin-bottom:8px;'>
+                    Computational Methods → Papers
+                </div>""")
+                method_technique_df = gr.Dataframe(
+                    headers=["Computational Method", "Papers"],
+                    interactive=False,
+                    wrap=True,
+                )
+
+                gr.HTML("<hr style='border:none;border-top:1px solid var(--border);margin:12px 0;'>")
+                
+                # CSV Download
+                method_dl_files = gr.File(
+                    label="Download CSV Report",
+                    file_count="multiple",
+                    interactive=False,
+                )
+
         # ────────────────────────────────────────────────────────────────
         # Event wiring
         # ────────────────────────────────────────────────────────────────
@@ -1284,6 +1508,25 @@ def build_app() -> gr.Blocks:
             fn=auto_accept_review,
             inputs=[agent_state, chatbot, auto_accept_toggle],
             outputs=[chatbot, agent_state, phase_bar],
+        )
+
+        # ── Method Extraction event wiring ─────────────────────────────
+
+        pdf_upload.change(
+            fn=handle_pdf_upload,
+            inputs=[pdf_upload],
+            outputs=[method_status, method_stats],
+        )
+
+        run_methods_btn.click(
+            fn=run_method_extraction_pipeline,
+            inputs=[],
+            outputs=[
+                method_stats,
+                method_status,
+                method_technique_df,
+                method_dl_files,
+            ],
         )
 
     return app

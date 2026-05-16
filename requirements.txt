@@ -13,3 +13,4 @@ hdbscan
 umap-learn
 pynndescent
 peft
+pymupdf

@@ -52,6 +52,8 @@ from sentence_transformers import SentenceTransformer
 import hdbscan
 import umap
 
+import fitz  # PyMuPDF — text-only PDF extraction
+
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -1987,6 +1989,270 @@ def export_narrative(run_key: str) -> dict:
     }
 
 
+# ============================================================================
+# METHOD EXTRACTION — Per-Paper Computational Method Identification
+# ============================================================================
+
+def _extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract all text from a PDF using PyMuPDF (text only, no images)."""
+    import fitz
+    doc = fitz.open(pdf_path)
+    pages = []
+    for page in doc:
+        pages.append(page.get_text("text"))
+    doc.close()
+    return "\n".join(pages)
+
+
+def _extract_title_from_pdf(full_text: str) -> str:
+    """Try to extract the paper title from the first few lines of text."""
+    lines = full_text.strip().split("\n")
+    title_lines = []
+    for line in lines[:10]:
+        stripped = line.strip()
+        if not stripped:
+            if title_lines:
+                break
+            continue
+        low = stripped.lower()
+        if low.startswith("abstract") or low.startswith("keyword"):
+            break
+        if len(stripped) > 10:
+            title_lines.append(stripped)
+        if len(title_lines) >= 2:
+            break
+    return " ".join(title_lines)[:200] if title_lines else ""
+
+
+def _chunk_text(text: str, chunk_size: int = 12000, overlap: int = 1000) -> list[str]:
+    """Split text into chunks of `chunk_size` characters with `overlap`."""
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    text_len = len(text)
+    while start < text_len:
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        if end >= text_len:
+            break
+        start = end - overlap
+    return chunks
+
+
+# LLM prompt — extracts computational methods from a single paper's method section
+_EXTRACT_METHODS_PROMPT = PromptTemplate.from_template(
+        """You are an expert IS research methodologist. Read this excerpt from a research
+paper and identify ALL computational techniques and research methods used.
+
+The excerpt may come from methods or results. Use:
+- explicit method statements ("this study uses", "we employed")
+- analytical technique mentions in results (beta coefficients, BERT scores, LDA topics, network centrality)
+- sample/data descriptions (N=, dataset, corpus)
+- implicit method cues from results presentation (e.g., beta tables imply regression)
+Do not guess beyond evidence in the excerpt.
+
+A "computational method" or "analytical technique" refers to specific algorithms,
+statistical tests, machine learning models, NLP techniques, network measures,
+or simulation/optimization approaches.
+
+Paper: {paper_name}
+
+Excerpt text:
+{method_text}
+
+Return a JSON object with EXACTLY this key:
+    computational_methods : list of specific algorithms, models, or computational techniques found.
+                                                    Be very specific. DO NOT just say "Machine Learning", name the algorithm.
+                                                    Examples: ["Random Forest", "BERT", "K-means clustering", "LSTM", "XGBoost",
+                                                    "LDA topic modeling", "PLS-SEM", "CB-SEM", "OLS Regression", "ANOVA",
+                                                    "Network centrality", "Louvain community detection", "Sentiment Analysis (VADER)"]
+                                                    Return an empty list [] if absolutely no specific computational
+                                                    techniques or statistical models are mentioned.
+
+Respond with RAW JSON only. No markdown, no explanation.
+"""
+)
+
+
+@tool
+def extract_methods_from_pdfs(pdf_dir: str) -> dict:
+    """
+    Extract computational methods from each PDF paper.
+
+    For each PDF: extract text (no images) → split into overlapping chunks →
+    send each chunk to Mistral LLM → aggregate identified methods per paper.
+
+    Parameters
+    ----------
+    pdf_dir : str — directory containing PDF files
+
+    Returns
+    -------
+    dict with keys:
+        n_papers, results (list of per-paper method dicts), csv_path
+    """
+    pdf_dir_path = Path(pdf_dir)
+    if not pdf_dir_path.exists():
+        return {"error": f"PDF directory not found: {pdf_dir}"}
+
+    pdf_files = sorted(
+        [str(p) for p in pdf_dir_path.glob("*.pdf")]
+        + [str(p) for p in pdf_dir_path.glob("*.PDF")]
+    )
+    if not pdf_files:
+        return {"error": f"No PDF files found in {pdf_dir}"}
+
+    rdir = _ensure_dir(OUTPUT_DIR / "methods")
+
+    # Step 1: Extract full text from all PDFs and chunk them
+    paper_chunks = []
+    for idx, pdf_path in enumerate(pdf_files, start=1):
+        try:
+            full_text = _extract_text_from_pdf(pdf_path)
+            title = _extract_title_from_pdf(full_text)
+            chunks = _chunk_text(full_text)
+            
+            paper_chunks.append({
+                "paper_id": idx,
+                "paper_filename": Path(pdf_path).stem,
+                "paper_title": title or Path(pdf_path).stem,
+                "chunks": chunks,
+            })
+        except Exception as exc:
+            paper_chunks.append({
+                "paper_id": idx,
+                "paper_filename": Path(pdf_path).stem,
+                "paper_title": Path(pdf_path).stem,
+                "chunks": [],
+                "error": str(exc),
+            })
+
+    # Step 2: For each paper, use LLM on all chunks and aggregate
+    if not MISTRAL_API_KEY:
+        return {
+            "n_papers": len(pdf_files),
+            "results": paper_chunks,
+            "error": "MISTRAL_API_KEY not set — extracted text chunks but cannot identify methods via LLM.",
+        }
+
+    chain = _EXTRACT_METHODS_PROMPT | _llm() | JsonOutputParser()
+    paper_results = []
+
+    for entry in paper_chunks:
+        chunks = entry.get("chunks", [])
+        if not chunks:
+            paper_results.append({
+                "paper_id": entry["paper_id"],
+                "paper_filename": entry["paper_filename"],
+                "paper_title": entry.get("paper_title", ""),
+                "computational_methods": [],
+                "extraction_note": "No text extracted",
+            })
+            continue
+
+        all_comp_methods = set()
+
+        # Process each chunk
+        for chunk in chunks:
+            if len(chunk) < 50:
+                continue
+            try:
+                result = _invoke_with_retries(lambda c=chunk: chain.invoke({
+                    "paper_name": entry.get("paper_title", entry.get("paper_filename", "")),
+                    "method_text": c,
+                }))
+                
+                # Collect computational methods
+                cm = result.get("computational_methods", [])
+                if isinstance(cm, list):
+                    for item in cm:
+                        if isinstance(item, str) and item.strip():
+                            all_comp_methods.add(item.strip())
+                elif isinstance(cm, str) and cm.strip():
+                    all_comp_methods.add(cm.strip())
+
+            except Exception as exc:
+                pass # Skip failed chunks
+
+        paper_results.append({
+            "paper_id": entry["paper_id"],
+            "paper_filename": entry["paper_filename"],
+            "paper_title": entry.get("paper_title", ""),
+            "computational_methods": sorted(list(all_comp_methods)),
+            "chunks_processed": len(chunks)
+        })
+
+    # Save results
+    _save_json(rdir / "method_results.json", paper_results)
+
+    # Build CSV
+    rows = []
+    for r in paper_results:
+        comp_methods = r.get("computational_methods", [])
+        if isinstance(comp_methods, list):
+            comp_str = ", ".join(comp_methods)
+        else:
+            comp_str = str(comp_methods)
+        rows.append({
+            "Paper ID": r.get("paper_id", ""),
+            "Paper Title": r.get("paper_title", r.get("paper_filename", "")),
+            "Computational Methods": comp_str,
+        })
+
+    df = pd.DataFrame(rows)
+    csv_path = rdir / "method_summary.csv"
+    df.to_csv(csv_path, index=False)
+
+    def _clean_technique_name(name: str) -> str:
+        return re.sub(r"\s+", " ", name.strip())
+
+    technique_map: dict[str, dict[str, object]] = {}
+    for r in paper_results:
+        paper_title = r.get("paper_title") or r.get("paper_filename") or ""
+        paper_id = r.get("paper_id", "")
+        paper_label = f"{paper_id}: {paper_title}" if paper_id and paper_title else str(paper_title or paper_id)
+
+        methods = r.get("computational_methods", [])
+        if isinstance(methods, list):
+            techniques = set([m.strip() for m in methods if isinstance(m, str) and m.strip()])
+        elif isinstance(methods, str) and methods.strip():
+            techniques = set([m.strip() for m in re.split(r"[;,]", methods) if m.strip()])
+        else:
+            techniques = set()
+
+        for technique in techniques:
+            cleaned = _clean_technique_name(technique)
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key not in technique_map:
+                technique_map[key] = {"name": cleaned, "papers": set()}
+            technique_map[key]["papers"].add(paper_label)
+
+    technique_rows = [
+        {
+            "Computational Method": entry["name"],
+            "Papers": " | ".join(sorted(entry["papers"])),
+        }
+        for entry in sorted(technique_map.values(), key=lambda v: str(v["name"]).lower())
+    ]
+    technique_df = pd.DataFrame(
+        technique_rows,
+        columns=["Computational Method", "Papers"],
+    )
+    technique_csv_path = rdir / "technique_to_papers.csv"
+    technique_df.to_csv(technique_csv_path, index=False)
+
+    return {
+        "n_papers": len(pdf_files),
+        "n_extracted": len(paper_results),
+        "csv_path": str(csv_path),
+        "technique_csv_path": str(technique_csv_path),
+        "results": paper_results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool registry — imported by agent.py
 # ---------------------------------------------------------------------------
@@ -2001,4 +2267,5 @@ ALL_TOOLS = [
     verify_taxonomy_mapping_with_groq,
     generate_comparison_csv,
     export_narrative,
+    extract_methods_from_pdfs,
 ]
