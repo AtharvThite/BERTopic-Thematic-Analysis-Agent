@@ -2042,8 +2042,8 @@ def _chunk_text(text: str, chunk_size: int = 12000, overlap: int = 1000) -> list
 
 # LLM prompt — extracts computational methods from a single paper's method section
 _EXTRACT_METHODS_PROMPT = PromptTemplate.from_template(
-        """You are an expert IS research methodologist. Read this excerpt from a research
-paper and identify ALL computational techniques and research methods used.
+    """You are an expert IS research methodologist. Read this excerpt from a research
+paper and identify ALL computational techniques used.
 
 The excerpt may come from methods or results. Use:
 - explicit method statements ("this study uses", "we employed")
@@ -2110,13 +2110,13 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
     for idx, pdf_path in enumerate(pdf_files, start=1):
         try:
             full_text = _extract_text_from_pdf(pdf_path)
-            title = _extract_title_from_pdf(full_text)
+            title = Path(pdf_path).stem
             chunks = _chunk_text(full_text)
             
             paper_chunks.append({
                 "paper_id": idx,
                 "paper_filename": Path(pdf_path).stem,
-                "paper_title": title or Path(pdf_path).stem,
+                "paper_title": title,
                 "chunks": chunks,
             })
         except Exception as exc:
@@ -2207,11 +2207,97 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
     def _clean_technique_name(name: str) -> str:
         return re.sub(r"\s+", " ", name.strip())
 
-    technique_map: dict[str, dict[str, object]] = {}
+    def _normalize_technique_key(name: str) -> str:
+        cleaned = re.sub(r"[^a-z0-9+ ]", " ", name.lower())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = cleaned.replace("forests", "forest")
+        cleaned = cleaned.replace("trees", "tree")
+        cleaned = cleaned.replace("networks", "network")
+        cleaned = cleaned.replace("models", "model")
+        cleaned = cleaned.replace("transformers", "transformer")
+        cleaned = cleaned.replace("embeddings", "embedding")
+        cleaned = cleaned.replace("topics", "topic")
+        cleaned = cleaned.replace("measures", "measure")
+        return cleaned
+
+    canonical_patterns = [
+        (re.compile(r"\bbert\b"), "BERT"),
+        (re.compile(r"\bword2vec\b"), "Word2Vec"),
+        (re.compile(r"\bglove\b"), "GloVe"),
+        (re.compile(r"\bspecter\b"), "SPECTER"),
+        (re.compile(r"\bsentence[- ]?transformer"), "Sentence-Transformers"),
+        (re.compile(r"\blda\b|\blatent dirichlet allocation\b"), "LDA topic modeling"),
+        (re.compile(r"\bnmf\b|\bnon[- ]?negative matrix factorization\b"), "NMF topic modeling"),
+        (re.compile(r"\bbertopic\b"), "BERTopic"),
+        (re.compile(r"\bner\b|\bnamed entity recognition\b"), "Named entity recognition"),
+        (re.compile(r"\bsentiment\b"), "Sentiment analysis"),
+        (re.compile(r"\brandom forest\b"), "Random Forest"),
+        (re.compile(r"\bdecision tree\b"), "Decision Tree"),
+        (re.compile(r"\bgradient boosting\b|\bxgboost\b|\blightgbm\b|\bcatboost\b"), "Gradient boosting"),
+        (re.compile(r"\bsvm\b|\bsupport vector machine\b"), "SVM"),
+        (re.compile(r"\bneural network\b|\bdeep learning\b|\bmlp\b"), "Neural networks"),
+        (re.compile(r"\btransformer\b"), "Transformers"),
+        (re.compile(r"\bfine[- ]?tuning\b"), "Model fine-tuning"),
+        (re.compile(r"\bpls[- ]?sem\b|\bpartial least squares\b"), "PLS-SEM"),
+        (re.compile(r"\bcb[- ]?sem\b|\bcovariance[- ]?based sem\b"), "CB-SEM"),
+        (re.compile(r"\bsem\b|\bstructural equation model\b"), "SEM"),
+        (re.compile(r"\bglmm\b|\bgeneralized linear mixed model\b"), "GLMM"),
+        (re.compile(r"\birt\b|\bitem response theory\b"), "IRT"),
+        (re.compile(r"\bbayesian\b"), "Bayesian inference"),
+        (re.compile(r"\bmediation\b"), "Mediation analysis"),
+        (re.compile(r"\bmoderation\b"), "Moderation analysis"),
+        (re.compile(r"\bchi[- ]?square\b|\bchi square\b"), "Chi-square test"),
+        (re.compile(r"\banova\b"), "ANOVA"),
+        (re.compile(r"\bt[- ]?test\b"), "t-test"),
+        (re.compile(r"\bfactor analysis\b"), "Factor analysis"),
+        (re.compile(r"\btime[- ]?series\b"), "Time-series analysis"),
+        (re.compile(r"\blogistic regression\b"), "Logistic regression"),
+        (re.compile(r"\bols\b|\borderinary least squares\b|\blinear regression\b|\bmultiple regression\b"), "Linear regression (OLS)"),
+        (re.compile(r"\bregression\b"), "Regression"),
+        (re.compile(r"\bcentrality\b"), "Network centrality"),
+        (re.compile(r"\bcommunity detection\b|\blouvain\b|\bleiden\b"), "Community detection"),
+        (re.compile(r"\bergm\b|\bexponential random graph\b"), "ERGM"),
+        (re.compile(r"\blink prediction\b"), "Link prediction"),
+        (re.compile(r"\bagent[- ]?based\b"), "Agent-based simulation"),
+        (re.compile(r"\bmonte carlo\b"), "Monte Carlo simulation"),
+        (re.compile(r"\bbayesian optimization\b"), "Bayesian optimization"),
+    ]
+
+    def _canonicalize_technique(name: str) -> tuple[str, str]:
+        cleaned = _normalize_technique_key(name)
+        for pattern, canonical in canonical_patterns:
+            if pattern.search(cleaned):
+                return canonical, canonical.lower()
+        display = " ".join(word.capitalize() for word in cleaned.split())
+        display = display or _clean_technique_name(name)
+        return display, display.lower()
+
+    category_patterns = [
+        (re.compile(r"\b(bert|transformer|fine[- ]?tuning)\b"), "Transformers"),
+        (re.compile(r"\b(word2vec|glove|specter|sentence[- ]?transformer|embedding)\b"), "Embeddings"),
+        (re.compile(r"\b(topic modeling|lda|nmf|bertopic)\b"), "Topic Modeling"),
+        (re.compile(r"\b(ols|linear regression|logistic regression|regression)\b"), "Regression"),
+        (re.compile(r"\b(sem|pls[- ]?sem|cb[- ]?sem|structural equation)\b"), "SEM"),
+        (re.compile(r"\b(random forest|decision tree|svm|gradient boosting|xgboost|lightgbm|catboost)\b"), "Classic ML"),
+        (re.compile(r"\b(neural network|deep learning|lstm|cnn|mlp)\b"), "Deep Learning"),
+        (re.compile(r"\b(network|centrality|community detection|louvain|leiden|ergm|link prediction)\b"), "Network Analysis"),
+        (re.compile(r"\b(agent[- ]?based|monte carlo|bayesian optimization)\b"), "Simulation / Optimization"),
+        (re.compile(r"\b(anova|t[- ]?test|chi[- ]?square|factor analysis|time[- ]?series|glmm|irt|bayesian inference|mediation|moderation)\b"), "Statistical Tests / Models"),
+        (re.compile(r"\b(sentiment|ner|named entity recognition|nlp|text mining)\b"), "NLP / Text Mining"),
+    ]
+
+    def _categorize_technique(name: str) -> str:
+        key = _normalize_technique_key(name)
+        for pattern, category in category_patterns:
+            if pattern.search(key):
+                return category
+        return "Other"
+
+    category_map: dict[str, dict[str, object]] = {}
     for r in paper_results:
         paper_title = r.get("paper_title") or r.get("paper_filename") or ""
         paper_id = r.get("paper_id", "")
-        paper_label = f"{paper_id}: {paper_title}" if paper_id and paper_title else str(paper_title or paper_id)
+        paper_label = str(paper_title or paper_id)
 
         methods = r.get("computational_methods", [])
         if isinstance(methods, list):
@@ -2222,24 +2308,31 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
             techniques = set()
 
         for technique in techniques:
-            cleaned = _clean_technique_name(technique)
-            if not cleaned:
+            algorithm, _ = _canonicalize_technique(technique)
+            if not algorithm:
                 continue
-            key = cleaned.lower()
-            if key not in technique_map:
-                technique_map[key] = {"name": cleaned, "papers": set()}
-            technique_map[key]["papers"].add(paper_label)
+            category = _categorize_technique(technique)
+            key = category.lower()
+            if key not in category_map:
+                category_map[key] = {
+                    "name": category,
+                    "algorithms": set(),
+                    "papers": set(),
+                }
+            category_map[key]["algorithms"].add(algorithm)
+            category_map[key]["papers"].add(paper_label)
 
     technique_rows = [
         {
-            "Computational Method": entry["name"],
+            "Main Computational Technique": entry["name"],
+            "Algorithms": ", ".join(sorted(entry["algorithms"])),
             "Papers": " | ".join(sorted(entry["papers"])),
         }
-        for entry in sorted(technique_map.values(), key=lambda v: str(v["name"]).lower())
+        for entry in sorted(category_map.values(), key=lambda v: str(v["name"]).lower())
     ]
     technique_df = pd.DataFrame(
         technique_rows,
-        columns=["Computational Method", "Papers"],
+        columns=["Main Computational Technique", "Algorithms", "Papers"],
     )
     technique_csv_path = rdir / "technique_to_papers.csv"
     technique_df.to_csv(technique_csv_path, index=False)

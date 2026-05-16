@@ -875,7 +875,7 @@ def get_method_results_df() -> pd.DataFrame:
 
 def get_method_technique_df() -> pd.DataFrame:
     """Return the technique-to-papers summary dataframe."""
-    columns = ["Computational Method", "Papers"]
+    columns = ["Main Computational Technique", "Algorithms", "Papers"]
     csv_path = OUTPUTS_DIR / "methods" / "technique_to_papers.csv"
     if csv_path.exists():
         try:
@@ -1403,10 +1403,10 @@ def build_app() -> gr.Blocks:
                 # Results Dataframe
                 gr.HTML("""
                 <div style='font-size:0.82rem;color:var(--text-secondary);font-weight:600;margin-bottom:8px;'>
-                    Computational Methods → Papers
+                    Computational Techniques → Algorithms → Papers
                 </div>""")
                 method_technique_df = gr.Dataframe(
-                    headers=["Computational Method", "Papers"],
+                    headers=["Main Computational Technique", "Algorithms", "Papers"],
                     interactive=False,
                     wrap=True,
                 )
