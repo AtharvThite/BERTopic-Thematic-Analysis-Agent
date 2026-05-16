@@ -2222,20 +2222,46 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
 
     canonical_patterns = [
         (re.compile(r"\bbert\b"), "BERT"),
+        (re.compile(r"\broberta\b"), "RoBERTa"),
+        (re.compile(r"\bxlm[- ]?roberta\b"), "XLM-RoBERTa"),
+        (re.compile(r"\bgpt[- ]?[0-9]*\b"), "GPT"),
+        (re.compile(r"\bt5\b"), "T5"),
         (re.compile(r"\bword2vec\b"), "Word2Vec"),
         (re.compile(r"\bglove\b"), "GloVe"),
+        (re.compile(r"\bdoc2vec\b"), "Doc2Vec"),
+        (re.compile(r"\bfasttext\b"), "fastText"),
         (re.compile(r"\bspecter\b"), "SPECTER"),
         (re.compile(r"\bsentence[- ]?transformer"), "Sentence-Transformers"),
+        (re.compile(r"\btf[- ]?idf\b"), "TF-IDF"),
+        (re.compile(r"\bbm25\b"), "BM25"),
+        (re.compile(r"\bbag of words\b|\bbow\b"), "Bag-of-words"),
         (re.compile(r"\blda\b|\blatent dirichlet allocation\b"), "LDA topic modeling"),
         (re.compile(r"\bnmf\b|\bnon[- ]?negative matrix factorization\b"), "NMF topic modeling"),
+        (re.compile(r"\blsa\b|\blsi\b|\blatent semantic analysis\b"), "LSA"),
         (re.compile(r"\bbertopic\b"), "BERTopic"),
+        (re.compile(r"\bk[- ]?means\b"), "K-means clustering"),
+        (re.compile(r"\bhierarchical clustering\b"), "Hierarchical clustering"),
+        (re.compile(r"\bdbscan\b"), "DBSCAN"),
+        (re.compile(r"\bhdbscan\b"), "HDBSCAN"),
+        (re.compile(r"\bgmm\b|\bgaussian mixture\b"), "Gaussian mixture model"),
+        (re.compile(r"\bpca\b|\bprincipal component analysis\b"), "PCA"),
+        (re.compile(r"\bsvd\b|\bsingular value decomposition\b"), "SVD"),
+        (re.compile(r"\btsne\b|\bt-sne\b"), "t-SNE"),
+        (re.compile(r"\bumap\b"), "UMAP"),
         (re.compile(r"\bner\b|\bnamed entity recognition\b"), "Named entity recognition"),
         (re.compile(r"\bsentiment\b"), "Sentiment analysis"),
         (re.compile(r"\brandom forest\b"), "Random Forest"),
         (re.compile(r"\bdecision tree\b"), "Decision Tree"),
         (re.compile(r"\bgradient boosting\b|\bxgboost\b|\blightgbm\b|\bcatboost\b"), "Gradient boosting"),
         (re.compile(r"\bsvm\b|\bsupport vector machine\b"), "SVM"),
+        (re.compile(r"\bknn\b|\bk[- ]?nearest neighbor\b"), "KNN"),
+        (re.compile(r"\bnaive bayes\b"), "Naive Bayes"),
         (re.compile(r"\bneural network\b|\bdeep learning\b|\bmlp\b"), "Neural networks"),
+        (re.compile(r"\bcnn\b|\bconvolutional neural network\b"), "CNN"),
+        (re.compile(r"\brnn\b|\brecurrent neural network\b"), "RNN"),
+        (re.compile(r"\blstm\b"), "LSTM"),
+        (re.compile(r"\bgru\b"), "GRU"),
+        (re.compile(r"\bautoencoder\b"), "Autoencoder"),
         (re.compile(r"\btransformer\b"), "Transformers"),
         (re.compile(r"\bfine[- ]?tuning\b"), "Model fine-tuning"),
         (re.compile(r"\bpls[- ]?sem\b|\bpartial least squares\b"), "PLS-SEM"),
@@ -2248,19 +2274,68 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
         (re.compile(r"\bmoderation\b"), "Moderation analysis"),
         (re.compile(r"\bchi[- ]?square\b|\bchi square\b"), "Chi-square test"),
         (re.compile(r"\banova\b"), "ANOVA"),
+        (re.compile(r"\bmanova\b"), "MANOVA"),
+        (re.compile(r"\bancova\b"), "ANCOVA"),
+        (re.compile(r"\bmancova\b"), "MANCOVA"),
         (re.compile(r"\bt[- ]?test\b"), "t-test"),
+        (re.compile(r"\bwilcoxon\b"), "Wilcoxon test"),
+        (re.compile(r"\bkruskal[- ]?wallis\b"), "Kruskal-Wallis test"),
         (re.compile(r"\bfactor analysis\b"), "Factor analysis"),
         (re.compile(r"\btime[- ]?series\b"), "Time-series analysis"),
+        (re.compile(r"\barima\b"), "ARIMA"),
+        (re.compile(r"\bsarima\b"), "SARIMA"),
+        (re.compile(r"\bvar\b|\bvector autoregression\b"), "VAR"),
+        (re.compile(r"\bprophet\b"), "Prophet"),
+        (re.compile(r"\bpanel regression\b|\bpanel data\b"), "Panel regression"),
+        (re.compile(r"\bfixed effects\b"), "Fixed-effects regression"),
+        (re.compile(r"\brandom effects\b"), "Random-effects regression"),
+        (re.compile(r"\bmultilevel\b|\bhierarchical linear model\b|\bhlm\b|\bmixed effects\b"), "Multilevel / mixed-effects regression"),
+        (re.compile(r"\bglm\b|\bgeneralized linear model\b"), "Generalized linear model"),
+        (re.compile(r"\bgls\b|\bgeneralized least squares\b"), "Generalized least squares"),
+        (re.compile(r"\bgee\b|\bgeneralized estimating equation\b"), "GEE"),
+        (re.compile(r"\bgmm\b|\bgeneralized method of moments\b"), "GMM"),
+        (re.compile(r"\b2sls\b|\btwo[- ]?stage least squares\b"), "2SLS"),
+        (re.compile(r"\b3sls\b|\bthree[- ]?stage least squares\b"), "3SLS"),
+        (re.compile(r"\binstrumental variable\b|\biv\b"), "Instrumental variables"),
+        (re.compile(r"\btobit\b"), "Tobit regression"),
+        (re.compile(r"\bheckman\b"), "Heckman selection model"),
+        (re.compile(r"\bpoisson\b"), "Poisson regression"),
+        (re.compile(r"\bnegative binomial\b"), "Negative binomial regression"),
+        (re.compile(r"\bprobit\b"), "Probit regression"),
+        (re.compile(r"\bsurvival analysis\b|\bcox\b|\bhazard model\b|\bkaplan[- ]?meier\b"), "Survival analysis"),
+        (re.compile(r"\blatent class analysis\b|\blca\b"), "Latent class analysis"),
+        (re.compile(r"\blatent profile analysis\b|\blpa\b"), "Latent profile analysis"),
         (re.compile(r"\blogistic regression\b"), "Logistic regression"),
         (re.compile(r"\bols\b|\borderinary least squares\b|\blinear regression\b|\bmultiple regression\b"), "Linear regression (OLS)"),
+        (re.compile(r"\bridge regression\b|\bridge\b"), "Ridge regression"),
+        (re.compile(r"\blasso\b"), "LASSO regression"),
+        (re.compile(r"\belastic net\b"), "Elastic Net regression"),
         (re.compile(r"\bregression\b"), "Regression"),
         (re.compile(r"\bcentrality\b"), "Network centrality"),
         (re.compile(r"\bcommunity detection\b|\blouvain\b|\bleiden\b"), "Community detection"),
         (re.compile(r"\bergm\b|\bexponential random graph\b"), "ERGM"),
         (re.compile(r"\blink prediction\b"), "Link prediction"),
+        (re.compile(r"\bpagerank\b|\bpage rank\b"), "PageRank"),
+        (re.compile(r"\bgraph neural network\b|\bgnn\b"), "Graph neural networks"),
+        (re.compile(r"\bhidden markov\b|\bhmm\b"), "Hidden Markov Model"),
+        (re.compile(r"\bmarkov chain\b|\bmarkov model\b"), "Markov models"),
+        (re.compile(r"\bkalman filter\b"), "Kalman filter"),
+        (re.compile(r"\bstate[- ]?space\b"), "State-space models"),
+        (re.compile(r"\bhawkes\b"), "Hawkes process"),
+        (re.compile(r"\brecommender\b|\bcollaborative filtering\b|\bmatrix factorization\b"), "Recommender systems"),
+        (re.compile(r"\bahp\b|\banalytic hierarchy process\b"), "AHP"),
+        (re.compile(r"\btopsis\b"), "TOPSIS"),
+        (re.compile(r"\bvikor\b"), "VIKOR"),
+        (re.compile(r"\bpromethee\b"), "PROMETHEE"),
+        (re.compile(r"\bdematel\b"), "DEMATEL"),
+        (re.compile(r"\bdea\b|\bdata envelopment analysis\b"), "DEA"),
+        (re.compile(r"\bsfa\b|\bstochastic frontier\b"), "SFA"),
         (re.compile(r"\bagent[- ]?based\b"), "Agent-based simulation"),
         (re.compile(r"\bmonte carlo\b"), "Monte Carlo simulation"),
         (re.compile(r"\bbayesian optimization\b"), "Bayesian optimization"),
+        (re.compile(r"\blinear programming\b|\binteger programming\b|\bmixed integer\b"), "Mathematical optimization"),
+        (re.compile(r"\bgenetic algorithm\b"), "Genetic algorithms"),
+        (re.compile(r"\bsimulated annealing\b"), "Simulated annealing"),
     ]
 
     def _canonicalize_technique(name: str) -> tuple[str, str]:
@@ -2273,24 +2348,58 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
         return display, display.lower()
 
     category_patterns = [
-        (re.compile(r"\b(bert|transformer|fine[- ]?tuning)\b"), "Transformers"),
-        (re.compile(r"\b(word2vec|glove|specter|sentence[- ]?transformer|embedding)\b"), "Embeddings"),
-        (re.compile(r"\b(topic modeling|lda|nmf|bertopic)\b"), "Topic Modeling"),
-        (re.compile(r"\b(ols|linear regression|logistic regression|regression)\b"), "Regression"),
-        (re.compile(r"\b(sem|pls[- ]?sem|cb[- ]?sem|structural equation)\b"), "SEM"),
-        (re.compile(r"\b(random forest|decision tree|svm|gradient boosting|xgboost|lightgbm|catboost)\b"), "Classic ML"),
-        (re.compile(r"\b(neural network|deep learning|lstm|cnn|mlp)\b"), "Deep Learning"),
-        (re.compile(r"\b(network|centrality|community detection|louvain|leiden|ergm|link prediction)\b"), "Network Analysis"),
-        (re.compile(r"\b(agent[- ]?based|monte carlo|bayesian optimization)\b"), "Simulation / Optimization"),
-        (re.compile(r"\b(anova|t[- ]?test|chi[- ]?square|factor analysis|time[- ]?series|glmm|irt|bayesian inference|mediation|moderation)\b"), "Statistical Tests / Models"),
-        (re.compile(r"\b(sentiment|ner|named entity recognition|nlp|text mining)\b"), "NLP / Text Mining"),
+        (re.compile(r"\b(bert|roberta|xlm roberta|gpt|t5|transformer|fine[- ]?tuning)\b"), "Transformers"),
+        (re.compile(r"\b(word2vec|glove|doc2vec|fasttext|specter|sentence[- ]?transformer|embedding|tf[- ]?idf|bm25|bag of words|bow)\b"), "Embeddings / Representation"),
+        (re.compile(r"\b(topic modeling|lda|nmf|bertopic|lsa|lsi)\b"), "Topic Modeling"),
+        (re.compile(r"\b(k[- ]?means|hierarchical clustering|dbscan|hdbscan|gaussian mixture|gmm|clustering)\b"), "Clustering"),
+        (re.compile(r"\b(pca|svd|t-sne|tsne|umap|dimensionality reduction)\b"), "Dimensionality Reduction"),
+        (re.compile(r"\b(arima|sarima|var|prophet|time[- ]?series)\b"), "Time Series / Forecasting"),
+        (re.compile(r"\b(panel data|panel regression|fixed effects|random effects|multilevel|hierarchical linear model|hlm|mixed effects|glm|gls|gee|gmm|2sls|3sls|instrumental variable|tobit|heckman|poisson|negative binomial|probit|logit)\b"), "Econometric / Panel Models"),
+        (re.compile(r"\b(ols|linear regression|logistic regression|ridge|lasso|elastic net|regression)\b"), "Regression"),
+        (re.compile(r"\b(sem|pls[- ]?sem|cb[- ]?sem|structural equation|cfa|efa)\b"), "SEM"),
+        (re.compile(r"\b(latent class analysis|latent profile analysis|latent variable|mixture model)\b"), "Latent Variable Models"),
+        (re.compile(r"\b(grad(ient)? boosting|xgboost|lightgbm|catboost)\b"), "Boosting / Ensembles"),
+        (re.compile(r"\b(random forest|decision tree|svm|knn|naive bayes)\b"), "Classic ML"),
+        (re.compile(r"\b(neural network|deep learning|lstm|cnn|rnn|gru|mlp|autoencoder)\b"), "Deep Learning"),
+        (re.compile(r"\b(ner|named entity recognition|sentiment|nlp|text mining|tokenization|stemming|lemmatization|keyword extraction)\b"), "NLP / Text Mining"),
+        (re.compile(r"\b(network|centrality|community detection|louvain|leiden|ergm|link prediction|pagerank|graph neural network|gnn)\b"), "Network Analysis"),
+        (re.compile(r"\b(agent[- ]?based|monte carlo|bayesian optimization|linear programming|integer programming|genetic algorithm|simulated annealing)\b"), "Simulation / Optimization"),
+        (re.compile(r"\b(survival|cox|hazard|kaplan[- ]?meier)\b"), "Survival / Event History"),
+        (re.compile(r"\b(bayesian|mcmc|gibbs|variational)\b"), "Bayesian Methods"),
+        (re.compile(r"\b(anova|manova|ancova|mancova|t[- ]?test|chi[- ]?square|factor analysis|glmm|irt|mediation|moderation|wilcoxon|kruskal[- ]?wallis)\b"), "Statistical Tests / Models"),
+        (re.compile(r"\b(difference[- ]?in[- ]?differences|did|regression discontinuity|rdd|instrumental variable|iv|propensity score|matching)\b"), "Causal Inference"),
+        (re.compile(r"\b(recommender|collaborative filtering|matrix factorization)\b"), "Recommender Systems"),
+        (re.compile(r"\b(hidden markov|hmm|markov|kalman|state[- ]?space|hawkes)\b"), "Sequence / Stochastic Processes"),
+        (re.compile(r"\b(ahp|analytic hierarchy process|topsis|vikor|promethee|dematel)\b"), "Decision Analysis / MCDA"),
+        (re.compile(r"\b(dea|data envelopment analysis|stochastic frontier|sfa|frontier analysis)\b"), "Efficiency / Frontier Analysis"),
     ]
 
-    def _categorize_technique(name: str) -> str:
-        key = _normalize_technique_key(name)
-        for pattern, category in category_patterns:
-            if pattern.search(key):
-                return category
+    def _categorize_technique(*names: str) -> str:
+        for name in names:
+            if not name:
+                continue
+            key = _normalize_technique_key(name)
+            for pattern, category in category_patterns:
+                if pattern.search(key):
+                    return category
+            fallback_keywords = [
+                ("Classic ML", ["classifier", "classification", "predictive model", "prediction", "supervised"]),
+                ("Clustering", ["cluster", "clustering"]),
+                ("Topic Modeling", ["topic", "semantic"]),
+                ("Embeddings / Representation", ["embedding", "vector", "tf idf", "bow", "bag of words"]),
+                ("Regression", ["regression", "logit", "probit", "panel", "fixed effects", "random effects", "glm", "gls", "gee", "gmm"]),
+                ("SEM", ["sem", "structural equation", "factor", "latent"]),
+                ("Bayesian Methods", ["bayesian", "mcmc", "gibbs", "prior", "posterior"]),
+                ("Time Series / Forecasting", ["time series", "forecast", "arima", "sarima", "var", "prophet"]),
+                ("NLP / Text Mining", ["nlp", "text", "token", "lemma", "stem", "language"]),
+                ("Network Analysis", ["network", "graph", "node", "edge"]),
+                ("Simulation / Optimization", ["simulation", "optimi", "heuristic", "metaheuristic", "monte carlo", "agent-based"]),
+            ]
+            for category, keywords in fallback_keywords:
+                if any(k in key for k in keywords):
+                    return category
+            if any(token in key for token in ["model", "analysis", "estimation", "test"]):
+                return "Statistical Tests / Models"
         return "Other"
 
     category_map: dict[str, dict[str, object]] = {}
@@ -2311,7 +2420,7 @@ def extract_methods_from_pdfs(pdf_dir: str) -> dict:
             algorithm, _ = _canonicalize_technique(technique)
             if not algorithm:
                 continue
-            category = _categorize_technique(technique)
+            category = _categorize_technique(technique, algorithm)
             key = category.lower()
             if key not in category_map:
                 category_map[key] = {
